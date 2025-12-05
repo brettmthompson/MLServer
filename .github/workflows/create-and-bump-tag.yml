@@ -79,7 +79,8 @@ jobs:
         run: |
             import sys
             import subprocess
-            tag_name = "$TAG_NAME"
+            import os
+            tag_name = os.environ['TAG_NAME']
             command = ['git', 'tag', '-l', tag_name]
             output = subprocess.check_output(command, stderr=subprocess.STDOUT)
             if output.decode() != "":
