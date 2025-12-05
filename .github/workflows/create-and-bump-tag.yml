@@ -33,6 +33,10 @@ jobs:
     steps:
       - name: Validate tag format
         run: |
+          if [[ "$TAG_NAME" == "$NEXT_TAG_NAME" ]]; then
+            echo "Error: tag name and next tag name must be different (both are: $TAG_NAME)"
+            exit 1
+          fi
           if [[ ! "$TAG_NAME" =~ ^odh-v[0-9]+\.[0-9]+$ ]]; then
             echo "Error: tag name format invalid: $TAG_NAME (expected format: odh-vX.Y, e.g., odh-v2.35)"
             exit 1
