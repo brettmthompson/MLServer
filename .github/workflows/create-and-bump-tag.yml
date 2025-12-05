@@ -21,6 +21,10 @@ permissions:
   contents: write
   packages: write
   pull-requests: write
+
+env:
+  TAG_NAME: ${{ github.event.inputs.tag_name }}
+  NEXT_TAG_NAME: ${{ github.event.inputs.next_tag_name }}
   
 jobs:
   validate-tag:
@@ -29,16 +33,12 @@ jobs:
     steps:
       - name: Validate tag format
         run: |
-          CURRENT_TAG="${{ github.event.inputs.tag_name }}"
-          NEXT_TAG="${{ github.event.inputs.next_tag_name }}"
-
-          # Validate tag format
-          if [[ ! "$CURRENT_TAG" =~ ^odh-v[0-9]+\.[0-9]+$ ]]; then
-            echo "Error: CURRENT_TAG format invalid: $CURRENT_TAG (expected format: odh-vX.Y, e.g., odh-v2.35)"
+          if [[ ! "$TAG_NAME" =~ ^odh-v[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: tag name format invalid: $TAG_NAME (expected format: odh-vX.Y, e.g., odh-v2.35)"
             exit 1
           fi
-          if [[ ! "$NEXT_TAG" =~ ^odh-v[0-9]+\.[0-9]+$ ]]; then
-            echo "Error: NEXT_TAG format invalid: $NEXT_TAG (expected format: odh-vX.Y, e.g., odh-v2.36)"
+          if [[ ! "$NEXT_TAG_NAME" =~ ^odh-v[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: next tag name format invalid: $NEXT_TAG_NAME (expected format: odh-vX.Y, e.g., odh-v2.36)"
             exit 1
           fi   
       - name: Checkout code
@@ -51,8 +51,8 @@ jobs:
             echo "Error: .tekton/mlserver-push.yaml not found"
             exit 1
           fi
-          if ! grep -q "mlserver:${CURRENT_TAG}" .tekton/mlserver-push.yaml; then
-            echo "Error: Tag ${CURRENT_TAG} not found in .tekton/mlserver-push.yaml"
+          if ! grep -q "mlserver:$TAG_NAME" .tekton/mlserver-push.yaml; then
+            echo "Error: Tag $TAG_NAME not found in .tekton/mlserver-push.yaml"
             exit 1
           fi
 
@@ -72,14 +72,14 @@ jobs:
       - name: Print tags
         run: | 
           echo "Old Tag=${{ steps.get_tag.outputs.old_tag_name }}"
-          echo "New Tag=${{ github.event.inputs.tag_name }}"
-          echo "Next Tag=${{ github.event.inputs.next_tag_name }}"
+          echo "New Tag=$TAG_NAME"
+          echo "Next Tag=$NEXT_TAG_NAME"
           echo "$(basename ${{ github.ref }})"
       - name: Check if tag exists
         run: |
             import sys
             import subprocess
-            tag_name = "${{ github.event.inputs.tag_name }}"
+            tag_name = "$TAG_NAME"
             command = ['git', 'tag', '-l', tag_name]
             output = subprocess.check_output(command, stderr=subprocess.STDOUT)
             if output.decode() != "":
@@ -102,8 +102,8 @@ jobs:
         run: |
           git config --global user.email "github-actions@github.com"
           git config --global user.name "GitHub Actions"
-          git tag -a ${{ github.event.inputs.tag_name }} -m "Release ${{ github.event.inputs.tag_name }}"
-          git push origin ${{ github.event.inputs.tag_name }}
+          git tag -a $TAG_NAME -m "Release $TAG_NAME"
+          git push origin $TAG_NAME
   
   bump-tag: 
     runs-on: ubuntu-latest
@@ -115,12 +115,9 @@ jobs:
           ref: ${{ github.ref }}
       - name: Update mlserver-push.yaml with next tag
         run: |
-          CURRENT_TAG="${{ github.event.inputs.tag_name }}"
-          NEXT_TAG="${{ github.event.inputs.next_tag_name }}"
-          
-          echo "Updating mlserver image tag from $CURRENT_TAG to $NEXT_TAG in .tekton/mlserver-push.yaml..."
+          echo "Updating mlserver image tag from $TAG_NAME to $NEXT_TAG_NAME in .tekton/mlserver-push.yaml..."
 
-          sed -i "s|mlserver:${CURRENT_TAG}|mlserver:${NEXT_TAG}|g" .tekton/mlserver-push.yaml
+          sed -i "s|mlserver:$TAG_NAME|mlserver:$NEXT_TAG_NAME|g" .tekton/mlserver-push.yaml
 
           echo "Update complete."
       - name: Create Pull Request
@@ -135,24 +132,24 @@ jobs:
             git config --global user.name "GitHub Actions"
 
             # Create a new branch for the PR
-            BRANCH_NAME="bump-tag-${{ github.event.inputs.next_tag_name }}"
+            BRANCH_NAME="bump-tag-$NEXT_TAG_NAME"
             git checkout -b "$BRANCH_NAME"
 
             # Stage and commit changes
             git add .tekton/mlserver-push.yaml
-            git commit -m "chore(konflux): Bump release tag to ${{ github.event.inputs.next_tag_name }}"
+            git commit -m "chore(konflux): Bump release tag to $NEXT_TAG_NAME"
             git push -u origin "$BRANCH_NAME"
 
             # Create pull request using GitHub CLI
             gh pr create \
-              --title "chore(konflux): Bump release tag to ${{ github.event.inputs.next_tag_name }}" \
+              --title "chore(konflux): Bump release tag to $NEXT_TAG_NAME" \
               --body "$(cat <<'EOF'
           ## Description
           - Updated image tag reference in Konflux configuration
-          - Part of the release preparation workflow for ${{ github.event.inputs.tag_name }}
+          - Part of the release preparation workflow for $TAG_NAME
 
           ## Changes
-          - Release tag updated from `${{ github.event.inputs.tag_name }}` to `${{ github.event.inputs.next_tag_name }}` in `.tekton/mlserver-push.yaml`
+          - Release tag updated from `$TAG_NAME` to `$NEXT_TAG_NAME` in `.tekton/mlserver-push.yaml`
 
           🤖 Generated with GitHub Actions
           EOF
