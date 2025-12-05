@@ -148,13 +148,13 @@ jobs:
             # Create pull request using GitHub CLI
             gh pr create \
               --title "chore(konflux): Bump release tag to $NEXT_TAG_NAME" \
-              --body "$(cat <<'EOF'
+              --body "$(cat <<EOF
           ## Description
           - Updated image tag reference in Konflux configuration
           - Part of the release preparation workflow for $TAG_NAME
 
           ## Changes
-          - Release tag updated from `$TAG_NAME` to `$NEXT_TAG_NAME` in `.tekton/mlserver-push.yaml`
+          - Release tag updated from \`$TAG_NAME\` to \`$NEXT_TAG_NAME\` in \`.tekton/mlserver-push.yaml\`
 
           🤖 Generated with GitHub Actions
           EOF
