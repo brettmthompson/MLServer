@@ -41,6 +41,10 @@ jobs:
             echo "Error: NEXT_TAG format invalid: $NEXT_TAG (expected format: odh-vX.Y, e.g., odh-v2.36)"
             exit 1
           fi   
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
       - name: Validate current tag presence in mlserver-push.yaml
         run: |
           if [[ ! -f .tekton/mlserver-push.yaml ]]; then
