@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
         
 env:
-  UPSTREAM_URL: "https://github.com/opendatahub-io/MLServer.git"
+  UPSTREAM_URL: "https://github.com/brettmthompson/MLServer.git"
   RELEASE_BRANCH: ${{ github.ref_name }}
   TARGET_BRANCH: "rhoai-staging"
   SYNC_BRANCH: "sync-${RELEASE_BRANCH}-$(date +%Y-%m-%d-%H%M%S)"
