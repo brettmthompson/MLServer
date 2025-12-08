@@ -7,7 +7,6 @@ env:
   UPSTREAM_URL: "https://github.com/brettmthompson/MLServer.git"
   RELEASE_BRANCH: ${{ github.ref_name }}
   TARGET_BRANCH: "rhoai-staging"
-  SYNC_BRANCH: "sync-${RELEASE_BRANCH}-$(date +%Y-%m-%d-%H%M%S)"
 
 jobs:
   auto-merge:
@@ -23,6 +22,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          SYNC_BRANCH="sync-${RELEASE_BRANCH}-$(date +%Y-%m-%d-%H%M%S)"
+
           # Check if there is any open sync PR from this release branch
           EXISTING_PR=$(gh pr list --base "$TARGET_BRANCH" --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"sync-${RELEASE_BRANCH}-\")) | .number" | head -n1)
           if [ -n "$EXISTING_PR" ]; then
