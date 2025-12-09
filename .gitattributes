@@ -1,2 +1,3 @@
+.tekton/mlserver-push.yaml merge=ours
 .github/workflows/prow-merge-release-to-staging.yml merge=ours
 .github/workflows/create-and-bump-tag.yml merge=ours
