@@ -1,4 +1,4 @@
-name: "Prow Merge release-* Branch to rhoai-staging Branch"
+name: "Test - Prow Merge release-* Branch to rhoai-staging Branch"
 
 on:
   workflow_dispatch:
