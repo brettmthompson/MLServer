@@ -22,6 +22,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Generate sync branch name with timestamp
+          SYNC_BRANCH="sync-${RELEASE_BRANCH}-$(date +%Y-%m-%d-%H%M%S)"
+
           # Check if there is any open sync PR from this release branch
           EXISTING_PR=$(gh pr list --base "$TARGET_BRANCH" --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"sync-${RELEASE_BRANCH}-\")) | .number" | head -n1)
           if [ -n "$EXISTING_PR" ]; then
@@ -31,19 +34,35 @@ jobs:
           fi
 
           # Configure git
-          git config merge.ours.driver true
           git config user.name "Sync Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create new branch from current HEAD (rhoai-staging)
+          git checkout -b "$SYNC_BRANCH"
+
+          # Perform the merge to maintain commit history (--no-commit lets us modify before committing)
+          git merge "origin/$RELEASE_BRANCH" --no-commit --no-ff
+
+          # Restore the files we want to keep from TARGET_BRANCH (ours)
+          git checkout "$TARGET_BRANCH" -- .tekton/mlserver-push.yaml
+          git checkout "$TARGET_BRANCH" -- .github/workflows/prow-merge-release-to-staging.yml
+          git checkout "$TARGET_BRANCH" -- .github/workflows/create-and-bump-tag.yml
+
+          # Complete the merge
+          git commit -m "Sync $RELEASE_BRANCH to $TARGET_BRANCH"
+
+          # Push the sync branch
+          git push origin "$SYNC_BRANCH"
 
           # Create new PR
           gh pr create \
             --base "$TARGET_BRANCH" \
-            --head "$RELEASE_BRANCH" \
+            --head "$SYNC_BRANCH" \
             --title "Sync $RELEASE_BRANCH to $TARGET_BRANCH" \
             --body "$(cat <<EOF
           ## Description
           - Automated sync of changes from $RELEASE_BRANCH to $TARGET_BRANCH
-          - Part of RHOAI release preperation
+          - Part of RHOAI release preparation
 
           ## Changes
           - All changes from $RELEASE_BRANCH except:
