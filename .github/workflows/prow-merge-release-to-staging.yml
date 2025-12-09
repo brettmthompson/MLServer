@@ -61,6 +61,32 @@ jobs:
           # Perform the merge to maintain commit history
           git merge --no-edit "origin/$RELEASE_BRANCH"
 
+          # Exclude release workflow files by restoring them from rhoai-staging or removing them
+          FILES_TO_EXCLUDE=(
+            ".tekton/mlserver-push.yaml"
+            ".github/workflows/prow-merge-release-to-staging.yml"
+            ".github/workflows/create-and-bump-tag.yml"
+          )
+
+          for file in "${FILES_TO_EXCLUDE[@]}"; do
+            if git ls-tree -r origin/rhoai-staging --name-only | grep -q "^${file}$"; then
+              # File exists on rhoai-staging, restore it
+              echo "Restoring $file from rhoai-staging"
+              git checkout origin/rhoai-staging -- "$file"
+            else
+              # File doesn't exist on rhoai-staging, remove it
+              if [ -f "$file" ]; then
+                echo "Removing $file (not present on rhoai-staging)"
+                git rm "$file"
+              fi
+            fi
+          done
+
+          # Commit the exclusions if there are changes
+          if ! git diff --quiet --cached; then
+            git commit -m "Exclude release workflow specific files from sync"
+          fi
+
           # Push the sync branch
           git push origin "$SYNC_BRANCH"
 
