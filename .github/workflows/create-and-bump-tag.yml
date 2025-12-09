@@ -1,4 +1,4 @@
-name: Create Tag and Bump for Next Release
+name: Test - Create Tag and Bump for Next Release
 
 on:
   workflow_dispatch:
