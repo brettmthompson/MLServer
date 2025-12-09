@@ -34,7 +34,7 @@ jobs:
           fi
 
           # Check if there are any changes to sync
-          if ! git diff --quiet "origin/rhoai-staging...origin/$RELEASE_BRANCH"; then
+          if ! git diff --quiet "origin/rhoai-staging..origin/$RELEASE_BRANCH"; then
             echo "Changes detected between $RELEASE_BRANCH and rhoai-staging. Proceeding with PR creation."
           else
             echo "No changes to sync from $RELEASE_BRANCH to rhoai-staging."
