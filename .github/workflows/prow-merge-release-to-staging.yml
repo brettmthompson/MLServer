@@ -34,12 +34,12 @@ jobs:
             exit 1
           fi
 
-          # Check if there are any changes to sync (excluding specific workflow files)
+          # Check if there are any changes to sync (excluding release workflow files)
           if ! git diff --quiet "origin/rhoai-staging..origin/$RELEASE_BRANCH" -- . ':!.tekton/mlserver-push.yaml' ':!.github/workflows/prow-merge-release-to-staging.yml' ':!.github/workflows/create-and-bump-tag.yml'; then
             echo "Changes detected between $RELEASE_BRANCH and rhoai-staging. Proceeding with PR creation."
             echo "has_changes=true" >> $GITHUB_OUTPUT
           else
-            echo "No changes to sync from $RELEASE_BRANCH to rhoai-staging (excluding workflow files)."
+            echo "No changes to sync from $RELEASE_BRANCH to rhoai-staging (excluding release workflow files)."
             echo "The branches are already in sync."
             echo "has_changes=false" >> $GITHUB_OUTPUT
           fi
@@ -84,7 +84,7 @@ jobs:
 
           # Commit the exclusions if there are changes
           if ! git diff --quiet --cached; then
-            git commit -m "Exclude release workflow specific files from sync"
+            git commit -m "Exclude release workflow files from sync"
           fi
 
           # Push the sync branch
