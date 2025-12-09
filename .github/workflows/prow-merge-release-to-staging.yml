@@ -22,8 +22,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SYNC_BRANCH="sync-${RELEASE_BRANCH}-$(date +%Y-%m-%d-%H%M%S)"
-
           # Check if there is any open sync PR from this release branch
           EXISTING_PR=$(gh pr list --base "$TARGET_BRANCH" --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"sync-${RELEASE_BRANCH}-\")) | .number" | head -n1)
           if [ -n "$EXISTING_PR" ]; then
@@ -36,25 +34,10 @@ jobs:
           git config user.name "Sync Bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Create new branch from current HEAD (rhoai-staging)
-          git checkout -b "$SYNC_BRANCH"
-
-          # Checkout all files from release branch except excluded ones
-          git checkout "origin/$RELEASE_BRANCH" -- . \
-            ':(exclude).tekton/mlserver-push.yaml' \
-            ':(exclude).github/workflows/prow-merge-release-to-staging.yml' \
-            ':(exclude).github/workflows/create-and-bump-tag.yml'
-
-          # Commit the changes
-          git commit -m "Sync changes from $RELEASE_BRANCH to $TARGET_BRANCH" || echo "No changes to commit"
-
-          # Push the sync branch
-          git push origin "$SYNC_BRANCH"
-
           # Create new PR
           gh pr create \
             --base "$TARGET_BRANCH" \
-            --head "$SYNC_BRANCH" \
+            --head "$RELEASE_BRANCH" \
             --title "Sync $RELEASE_BRANCH to $TARGET_BRANCH" \
             --body "$(cat <<EOF
           ## Description
