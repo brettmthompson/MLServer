@@ -27,7 +27,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Check if there is any open sync PR from this release branch
-          EXISTING_PR=$(gh pr list --base "rhoai-staging" --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"sync/${RELEASE_BRANCH}\")) | .number" | head -n1)
+          EXISTING_PR=$(gh pr list \
+            --base "rhoai-staging" \
+            --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"sync/${RELEASE_BRANCH}\")) | .number" \
+            | head -n1)
           if [ -n "$EXISTING_PR" ]; then
             echo "PR #$EXISTING_PR already exists for syncing $RELEASE_BRANCH to rhoai-staging."
             echo "Please close any outstanding syncs from $RELEASE_BRANCH to rhoai-staging before proceeding."
@@ -35,7 +39,12 @@ jobs:
           fi
 
           # Check if there are any changes to sync (excluding release workflow files)
-          if ! git diff --quiet "origin/rhoai-staging..origin/$RELEASE_BRANCH" -- . ':!.tekton/mlserver-push.yaml' ':!.github/workflows/prow-merge-release-to-staging.yml' ':!.github/workflows/create-and-bump-tag.yml'; then
+          if ! git diff --quiet \
+            "origin/rhoai-staging..origin/$RELEASE_BRANCH" \
+            -- . \
+            ':!.tekton/mlserver-push.yaml' \
+            ':!.github/workflows/prow-merge-release-to-staging.yml' \
+            ':!.github/workflows/create-and-bump-tag.yml'; then
             echo "Changes detected between $RELEASE_BRANCH and rhoai-staging. Proceeding with PR creation."
             echo "has_changes=true" >> $GITHUB_OUTPUT
           else
