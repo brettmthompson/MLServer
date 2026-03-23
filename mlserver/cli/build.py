@@ -68,7 +68,7 @@ def _validate_and_normalise_allow_runtime_import_paths(
 
 def _validate_and_normalise_runtime_source_paths(
     runtime_source_paths: Optional[Sequence[str]],
-    allow_runtime_import_paths: list[str],
+    allow_runtime_import_paths: Sequence[str],
     *,
     build_folder: Optional[str] = None,
     runtime_paths_without_allowlist_message: str = (
@@ -145,7 +145,9 @@ def generate_dockerfile(
         build_folder=build_folder,
         cli_mode=False,
     )
-    trusted_runtime_allowlist_json = json.dumps(allow_runtime_import_paths)
+    # Always include default implementations plus any custom runtimes
+    all_allowed = sorted(ALLOWED_MODEL_IMPLEMENTATIONS.union(allow_runtime_import_paths))
+    trusted_runtime_allowlist_json = json.dumps(all_allowed)
     copy_lines = [
         "COPY --chown=1000 "
         f"./{runtime_path} "

@@ -1,15 +1,19 @@
 import asyncio
+import importlib
 import os
 import pytest
 import signal
 import sys
 
 from aiohttp.client_exceptions import ClientResponseError
+from click.testing import CliRunner
 from pathlib import Path
 from subprocess import Popen, TimeoutExpired
 from typing import Tuple
+from unittest.mock import Mock, AsyncMock
 
-from mlserver.settings import ModelSettings, Settings
+from mlserver.cli.main import root
+from mlserver.settings import ModelSettings, Settings, TRUSTED_RUNTIMES_ARTIFACT_PATH
 from mlserver.types import InferenceRequest
 
 from ..utils import (
@@ -195,3 +199,180 @@ async def test_concurrent_mlserver_start_spawns_workers(
         await asyncio.gather(*[client.close() for _, client in instances])
         for process, _ in instances:
             _stop_mlserver(process)
+
+
+# Unit tests for start command with custom runtime flags
+
+
+@pytest.fixture
+def cli_runner():
+    """Click CLI test runner."""
+    return CliRunner()
+
+
+@pytest.fixture
+def cli_main():
+    """Import mlserver.cli.main module for mocking."""
+    return importlib.import_module("mlserver.cli.main")
+
+
+def test_start_with_allow_runtime_when_artifact_exists(
+    cli_runner, tmp_path, monkeypatch, cli_main
+):
+    """When trusted-runtimes.json exists, --allow-runtime should be ignored with warning."""
+    # Create a fake runtime file so Click's path validation passes
+    runtime_file = Path(tmp_path) / "custom.py"
+    runtime_file.write_text("class MyRuntime: pass")
+
+    # Mock the artifact file to exist
+    monkeypatch.setattr(
+        "os.path.isfile", lambda path: path == TRUSTED_RUNTIMES_ARTIFACT_PATH
+    )
+
+    # Mock the setup function to verify it's NOT called
+    mock_setup = Mock()
+    monkeypatch.setattr(cli_main, "_setup_custom_runtimes", mock_setup)
+
+    # Mock load_settings and MLServer to prevent actual server start
+    mock_settings = Mock()
+    mock_models = []
+    mock_load = AsyncMock(return_value=(mock_settings, mock_models))
+    monkeypatch.setattr(cli_main, "load_settings", mock_load)
+
+    mock_server = Mock()
+    mock_server.start = AsyncMock()
+    mock_server_class = Mock(return_value=mock_server)
+    monkeypatch.setattr(cli_main, "MLServer", mock_server_class)
+
+    # Run the command with custom runtime flags
+    result = cli_runner.invoke(
+        root,
+        [
+            "start",
+            str(tmp_path),
+            "--allow-runtime",
+            "custom.MyRuntime",
+            "--runtime-path",
+            str(runtime_file),
+        ],
+    )
+
+    # Verify command succeeded
+    assert result.exit_code == 0
+
+    # Verify setup was NOT called (the key behavior when artifact exists)
+    mock_setup.assert_not_called()
+
+
+def test_start_with_allow_runtime_when_artifact_missing(
+    cli_runner, tmp_path, monkeypatch, cli_main
+):
+    """When trusted-runtimes.json doesn't exist, --allow-runtime should work."""
+    # Mock the artifact file to NOT exist
+    monkeypatch.setattr("os.path.isfile", lambda path: False)
+
+    # Create a fake runtime file
+    runtime_file = Path(tmp_path) / "custom.py"
+    runtime_file.write_text("class MyRuntime: pass")
+
+    # Mock the setup function to verify it IS called
+    mock_setup = Mock()
+    monkeypatch.setattr(cli_main, "_setup_custom_runtimes", mock_setup)
+
+    # Mock load_settings and MLServer to prevent actual server start
+    mock_settings = Mock()
+    mock_models = []
+    mock_load = AsyncMock(return_value=(mock_settings, mock_models))
+    monkeypatch.setattr(cli_main, "load_settings", mock_load)
+
+    mock_server = Mock()
+    mock_server.start = AsyncMock()
+    mock_server_class = Mock(return_value=mock_server)
+    monkeypatch.setattr(cli_main, "MLServer", mock_server_class)
+
+    # Run the command with custom runtime flags
+    result = cli_runner.invoke(
+        root,
+        [
+            "start",
+            str(tmp_path),
+            "--allow-runtime",
+            "custom.MyRuntime",
+            "--runtime-path",
+            str(runtime_file),
+        ],
+    )
+
+    # Verify no warning about ignored flags
+    assert "ignored" not in result.output.lower()
+
+    # Verify setup WAS called with correct arguments
+    mock_setup.assert_called_once()
+    call_args = mock_setup.call_args
+    assert call_args[0][0] == ("custom.MyRuntime",)  # allow_runtime_import_paths
+    assert call_args[0][1] == (str(runtime_file),)  # runtime_source_paths
+    assert call_args[0][2] == str(tmp_path)  # folder (models directory)
+
+
+def test_start_without_custom_runtime_flags(cli_runner, tmp_path, monkeypatch, cli_main):
+    """When no custom runtime flags provided, setup should not be called."""
+    # Mock the setup function to verify it's NOT called
+    mock_setup = Mock()
+    monkeypatch.setattr(cli_main, "_setup_custom_runtimes", mock_setup)
+
+    # Mock load_settings and MLServer to prevent actual server start
+    mock_settings = Mock()
+    mock_models = []
+    mock_load = AsyncMock(return_value=(mock_settings, mock_models))
+    monkeypatch.setattr(cli_main, "load_settings", mock_load)
+
+    mock_server = Mock()
+    mock_server.start = AsyncMock()
+    mock_server_class = Mock(return_value=mock_server)
+    monkeypatch.setattr(cli_main, "MLServer", mock_server_class)
+
+    # Run the command without custom runtime flags
+    result = cli_runner.invoke(root, ["start", str(tmp_path)])
+
+    # Verify setup was NOT called
+    mock_setup.assert_not_called()
+
+
+def test_start_with_multiple_allow_runtime_flags(
+    cli_runner, tmp_path, monkeypatch, cli_main
+):
+    """Multiple --allow-runtime flags should all be passed to setup."""
+    # Mock the artifact file to NOT exist
+    monkeypatch.setattr("os.path.isfile", lambda path: False)
+
+    # Mock the setup function
+    mock_setup = Mock()
+    monkeypatch.setattr(cli_main, "_setup_custom_runtimes", mock_setup)
+
+    # Mock load_settings and MLServer
+    mock_settings = Mock()
+    mock_models = []
+    mock_load = AsyncMock(return_value=(mock_settings, mock_models))
+    monkeypatch.setattr(cli_main, "load_settings", mock_load)
+
+    mock_server = Mock()
+    mock_server_class = Mock(return_value=mock_server)
+    monkeypatch.setattr(cli_main, "MLServer", mock_server_class)
+
+    # Run with multiple --allow-runtime flags
+    result = cli_runner.invoke(
+        root,
+        [
+            "start",
+            str(tmp_path),
+            "--allow-runtime",
+            "custom.Runtime1",
+            "--allow-runtime",
+            "custom.Runtime2",
+        ],
+    )
+
+    # Verify setup WAS called with all runtimes
+    mock_setup.assert_called_once()
+    call_args = mock_setup.call_args
+    assert call_args[0][0] == ("custom.Runtime1", "custom.Runtime2")

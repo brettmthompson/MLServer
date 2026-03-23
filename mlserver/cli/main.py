@@ -6,6 +6,7 @@ import click
 import asyncio
 
 from functools import wraps
+from collections.abc import Sequence
 
 from .init_project import init_cookiecutter_project
 
@@ -39,13 +40,113 @@ def root():
     pass
 
 
+def _setup_custom_runtimes(
+    allow_runtime_import_paths: Sequence[str],
+    runtime_source_paths: Sequence[str],
+    build_folder: str,
+) -> None:
+    """
+    Set up custom runtimes for the local environment.
+
+    Validates runtime import paths and source paths, adds them to sys.path,
+    and configures runtime overrides for the MLServer instance.
+    """
+    import os
+    import sys
+    from ..settings import set_runtime_start_overrides
+    from .build import _validate_and_normalise_runtime_source_paths
+    from ._runtime_utils import normalise_runtime_import_paths
+
+    # Validate and normalize runtime import paths
+    try:
+        canonical_runtimes = normalise_runtime_import_paths(allow_runtime_import_paths)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    # Validate runtime source paths
+    try:
+        validated_paths = _validate_and_normalise_runtime_source_paths(
+            runtime_source_paths,
+            canonical_runtimes,
+            build_folder=build_folder,
+            runtime_paths_without_allowlist_message=(
+                "Runtime source paths require matching custom runtime allowlist "
+                "entries."
+            ),
+            cli_mode=True,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    # Add validated paths to sys.path
+    for runtime_path in validated_paths:
+        abs_path = os.path.abspath(runtime_path)
+        # Add the parent directory to sys.path so imports work
+        if os.path.isfile(abs_path):
+            parent_dir = os.path.dirname(abs_path)
+        else:
+            # For directories, add the parent containing the package
+            parent_dir = os.path.dirname(abs_path.rstrip(os.sep))
+
+        if parent_dir and parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+            logger.debug(f"Added to Python path: {parent_dir}")
+
+    # Set runtime overrides (will be checked when loading allowlist)
+    set_runtime_start_overrides(frozenset(canonical_runtimes))
+
+
 @root.command("start")
 @click.argument("folder", nargs=1)
+@click.option(
+    "--allow-runtime",
+    "allow_runtime_import_paths",
+    multiple=True,
+    type=str,
+    help=(
+        "Additional custom runtime import path to allow. "
+        "Use exact dotted Python import paths (module.ClassName). "
+        "Only used if /etc/mlserver/trusted-runtimes.json doesn't exist."
+    ),
+)
+@click.option(
+    "--runtime-path",
+    "runtime_source_paths",
+    multiple=True,
+    type=click.Path(path_type=str, exists=True),
+    help=(
+        "Path to custom runtime to custom runtime Python module/package to add to "
+        "import path. Only used if /etc/mlserver/trusted-runtimes.json doesn't exist."
+    ),
+)
 @click_async
-async def start(folder: str):
+async def start(
+    folder: str,
+    allow_runtime_import_paths: tuple[str, ...] = (),
+    runtime_source_paths: tuple[str, ...] = (),
+):
     """
     Start serving a machine learning model with MLServer.
     """
+    # Handle custom runtime flags for local dev
+    if allow_runtime_import_paths or runtime_source_paths:
+        import os
+        from ..settings import TRUSTED_RUNTIMES_ARTIFACT_PATH
+
+        # Skip processing if /etc/mlserver/trusted-runtimes.json exists
+        if os.path.isfile(TRUSTED_RUNTIMES_ARTIFACT_PATH):
+            logger.warning(
+                "Custom runtime flags (--allow-runtime, --runtime-path) ignored: "
+                "trusted runtimes are locked via %s",
+                TRUSTED_RUNTIMES_ARTIFACT_PATH,
+            )
+        else:
+            _setup_custom_runtimes(
+                allow_runtime_import_paths,
+                runtime_source_paths,
+                folder,
+            )
+
     settings, models_settings = await load_settings(folder)
 
     server = MLServer(settings)
@@ -81,8 +182,8 @@ async def build(
     folder: str,
     tag: str,
     no_cache: bool = False,
-    allow_runtime_import_paths=(),
-    runtime_source_paths=(),
+    allow_runtime_import_paths: tuple[str, ...] = (),
+    runtime_source_paths: tuple[str, ...] = (),
 ):
     """
     Build a Docker image for a custom MLServer runtime.
@@ -143,8 +244,8 @@ async def init_project(template: str):
 async def dockerfile(
     folder: str,
     include_dockerignore: bool,
-    allow_runtime_import_paths=(),
-    runtime_source_paths=(),
+    allow_runtime_import_paths: tuple[str, ...] = (),
+    runtime_source_paths: tuple[str, ...] = (),
 ):
     """
     Generate a Dockerfile

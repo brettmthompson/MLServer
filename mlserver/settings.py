@@ -94,15 +94,35 @@ def canonicalize_runtime_import_path(import_path: str) -> str:
     return _BUILTIN_RUNTIME_IMPORT_PATH_ALIASES.get(import_path, import_path)
 
 
+# Global variable to store runtime overrides from CLI start command
+_RUNTIME_START_OVERRIDES: Optional[frozenset[str]] = None
+
+
+def set_runtime_start_overrides(custom_runtimes: frozenset[str]) -> None:
+    """Set custom runtimes from mlserver start flags."""
+    global _RUNTIME_START_OVERRIDES
+    _RUNTIME_START_OVERRIDES = custom_runtimes
+
+
 @lru_cache(maxsize=1)
 def _get_allowed_model_implementations() -> frozenset[str]:
+    # Try to load from file first
     image_baked = _load_image_baked_allowed_model_implementations(
         _get_trusted_runtimes_artifact_path()
     )
-    allowed = frozenset(ALLOWED_MODEL_IMPLEMENTATIONS.union(image_baked))
-    logger.debug(
-        "Trusted runtime allowlist loaded with %d entries.",
+
+    if image_baked:
+        # File exists: file contains defaults + custom
+        allowed = image_baked
+    else:
+        # File doesn't exist: use defaults + CLI overrides
+        runtime_overrides = _RUNTIME_START_OVERRIDES or frozenset()
+        allowed = frozenset(ALLOWED_MODEL_IMPLEMENTATIONS.union(runtime_overrides))
+
+    logger.info(
+        "Trusted runtime allowlist loaded with %d entries. Allowed runtimes locked to: %s",
         len(allowed),
+        sorted(allowed),
     )
     return allowed
 
