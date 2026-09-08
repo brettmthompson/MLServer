@@ -53,7 +53,7 @@ numpy = "*"
 pandas = "*"
 protobuf = ">=5.27.2,<7.0.0"
 uvicorn = "*"
-starlette = ">=1.0.1"
+starlette = ">=1.3.1"
 starlette-exporter = "*"
 py-grpc-prometheus = "*"
 aiokafka = "*"
@@ -61,7 +61,7 @@ aiokafka = "*"
 tritonclient = {version = ">=2.42", extras = ["http"]}
 # keep a min version for geventhttpclient to avoid compatibility regressions
 geventhttpclient = ">=2.1.1"
-aiohttp = ">=3.14.1,<4"
+aiohttp = ">=3.14.3,<4"
 urllib3 = ">=2.7.0"
 gevent = "*"
 aiofiles = "*"
@@ -69,7 +69,7 @@ orjson = "*"
 uvloop = {version = "*", markers = "sys_platform != 'win32' and (sys_platform != 'cygwin' and platform_python_implementation != 'PyPy')"}
 pydantic = "^2.7.1"
 pydantic-settings = "^2.3.0"
-python-multipart = ">=0.0.27,<0.0.33"
+python-multipart = ">=0.0.31,<0.0.33"
 
 opentelemetry-sdk = "^1.22.0"
 opentelemetry-instrumentation-fastapi = ">=0.43b0"
@@ -89,7 +89,7 @@ pytest-cases = "3.8.5"
 pytest-lazy-fixture = "^0.6.3"
 tox = "4.16.0"
 docker = "7.1.0"
-aiohttp = "3.14.1"
+aiohttp = "3.14.3"
 aiohttp-retry = "2.8.3"
 ## Used for FastAPI Async testing
 httpx = "0.27.0"
@@ -151,31 +151,11 @@ mlserver-sklearn = {path = "./runtimes/sklearn", develop = true}
 mlserver-xgboost = {path = "./runtimes/xgboost", develop = true}
 mlserver-lightgbm = {path = "./runtimes/lightgbm", develop = true}
 mlserver-onnx = {path = "./runtimes/onnx", develop = true, extras = ["cpu"]}
-mlserver-mlflow = {path = "./runtimes/mlflow", develop = true}
-mlserver-huggingface = {path = "./runtimes/huggingface", develop = true}
-mlserver-alibi-explain = {path = "./runtimes/alibi-explain", develop = true}
-mlserver-alibi-detect = {path = "./runtimes/alibi-detect", develop = true}
-mlserver-catboost = {path = "./runtimes/catboost", develop = true}
 
 [tool.poetry.group.all-runtimes-dev]
 optional = true
 
 [tool.poetry.group.all-runtimes-dev.dependencies]
-## Dev dependencies from Alibi-Explain
-requests-mock = "~1.11.0"
-types-requests = ">=2.28.11.5,<2.33.0.0"
-
-## Dev dependencies from MLflow
-torch = "^2.4"
-pytorch-lightning = "^2.4"
-torchmetrics = "1.6.0"
-torchvision = "0.19.1"
-mlflow = ">=3.0.0"
-
-## Dev dependencies from HuggingFace
-# TODO: Relax when we deprecate Conversation pipeline
-# see: https://github.com/SeldonIO/MLServer/issues/1955
-transformers = "4.41.2"
 
 [tool.poetry.group.docs]
 optional = true
