@@ -406,7 +406,7 @@ class InferencePool:
 
     async def _close_workers(self):
         cleanup_errors = []
-        for pid, worker in self._workers.items():
+        for pid, worker in list(self._workers.items()):
             # Best effort cleanup
             try:
                 await worker.stop()
