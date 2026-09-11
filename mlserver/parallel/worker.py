@@ -110,6 +110,9 @@ class Worker(Process):
             on_model_unload=self._on_worker_unload,
         )
         self._active = True
+        self._poller = select.poll()
+        self._poller.register(self._requests._reader, select.POLLIN)
+        self._poller.register(self._model_updates._reader, select.POLLIN)
 
     async def coro_run(self):
         self.__inner_init__()
@@ -132,16 +135,19 @@ class Worker(Process):
                         return
 
                     schedule_with_callback(
-                        self._process_model_update(model_update), self._handle_response
+                        self._process_model_update(model_update),
+                        self._handle_response,
                     )
 
     def _select(self):
-        readable, _, _ = select.select(
-            [self._requests._reader, self._model_updates._reader],
-            [],
-            [],
-        )
-
+        ready = {fd for fd, event in self._poller.poll() if event & select.POLLIN}
+        readable = []
+        for r in [self._requests._reader, self._model_updates._reader]:
+            try:
+                if r.fileno() in ready:
+                    readable.append(r)
+            except (ValueError, AttributeError):
+                pass
         return readable
 
     async def _process_request(self, request) -> ModelResponseMessage:

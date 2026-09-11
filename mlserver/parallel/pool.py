@@ -447,6 +447,11 @@ class InferencePool:
 
             logger.debug(f"Worker with PID {pid} on {self.name} stopped.")
 
+            # Cancel any in-flight requests for this worker
+            self._dispatcher.on_worker_stop(
+                worker, worker.exitcode if worker.exitcode is not None else -1
+            )
+
             results = await asyncio.gather(
                 *[callback(worker) for callback in self._on_worker_stop],
                 return_exceptions=True,
