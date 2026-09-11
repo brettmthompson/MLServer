@@ -1,6 +1,9 @@
 import pytest
 
+from unittest.mock import MagicMock
+
 from mlserver.model import MLModel
+from mlserver.parallel.model import ParallelModel
 from mlserver.types import InferenceRequest, InferenceResponse
 from mlserver.batching.hooks import load_batching, unload_batching
 from mlserver.batching.adaptive import AdaptiveBatcher
@@ -105,3 +108,18 @@ async def test_unload_batching_restores_predict_and_predict_stream_methods(
     assert sum_model.predict == original_predict
     assert sum_model.predict_stream == original_predict_stream
     assert AdaptiveBatcher.get_batcher(sum_model) is None
+
+
+async def test_load_batching_noop_for_parallel_model(sum_model: MLModel):
+    """load_batching must be a no-op for ParallelModel — batching is
+    installed on workers, not the main process."""
+    sum_model.settings.max_batch_size = 10
+    sum_model.settings.max_batch_time = 0.4
+
+    parallel_model = ParallelModel(sum_model, MagicMock())
+    original_predict = parallel_model.predict
+
+    await load_batching(parallel_model)
+
+    assert parallel_model.predict == original_predict
+    assert AdaptiveBatcher.get_batcher(parallel_model) is None

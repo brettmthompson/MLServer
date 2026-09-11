@@ -1,4 +1,5 @@
 import asyncio
+import random
 
 from contextlib import nullcontext
 from multiprocessing import Queue
@@ -89,19 +90,20 @@ class InferencePool:
     _PoolCleanupFailuresTotal = None
 
     @classmethod
-    def _increment_cleanup_failure_metric(cls, env_hash: str | None):
+    def _increment_cleanup_failure_metric(cls, pool_id: str | None):
         if cls._PoolCleanupFailuresTotal is None:
             cls._PoolCleanupFailuresTotal = Counter(
                 "pool_cleanup_failures_total",
                 "Total number of inference pool cleanup failures",
-                ["pool_env_hash"],
+                ["pool_id"],
             )
-        cls._PoolCleanupFailuresTotal.labels(pool_env_hash=env_hash or "").inc()
+        cls._PoolCleanupFailuresTotal.labels(pool_id=pool_id or "").inc()
 
     def __init__(
         self,
         settings: Settings,
         env: Environment | None = None,
+        pool_gid: str | None = None,
         on_worker_stop: Sequence[InferencePoolHook] = [],
         on_worker_load: Sequence[WorkerModelHook] = [],
         on_worker_unload: Sequence[WorkerModelHook] = [],
@@ -112,6 +114,7 @@ class InferencePool:
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
         self._env = env
+        self._pool_gid = pool_gid
         self._workers: dict[int, Worker] = {}
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
@@ -139,9 +142,16 @@ class InferencePool:
         return self._env.env_hash
 
     @property
+    def pool_gid(self) -> str | None:
+        return self._pool_gid
+
+    @property
     def name(self) -> str:
         if self.env_hash:
             return f"inference pool with hash '{self.env_hash}'"
+
+        if self._pool_gid:
+            return f"inference pool with GID '{self._pool_gid}'"
 
         return "default inference pool"
 
@@ -149,7 +159,7 @@ class InferencePool:
         # If the inference pool is closing, or the current worker
         # is not in this inference pool, worker stop handling
         # should be skipped
-        if self._closing or pid not in self._workers:
+        if pid not in self._workers:
             return
 
         worker = self._workers[pid]
@@ -174,7 +184,7 @@ class InferencePool:
             failures = [r for r in results if isinstance(r, Exception)]
             if failures:
                 # Track cleanup failures
-                self._increment_cleanup_failure_metric(self.env_hash)
+                self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
                 logger.error(
                     f"{len(failures)} worker stop hook(s) failed "
                     f"for PID {pid} on {self.name}",
@@ -186,13 +196,17 @@ class InferencePool:
             # replacement's replay. The task is kept alive by the event loop's
             # execution machinery (Handle → lock waiter → gather futures)
             # throughout its lifetime — no GC risk.
-            asyncio.create_task(self._safe_start_worker())  # noqa: RUF006
+            if not self._closing:
+                asyncio.create_task(self._safe_start_worker())  # noqa: RUF006
 
     async def _safe_start_worker(self):
         """
         Fire-and-forget worker restart for use with asyncio.create_task.
         Logs failures rather than raising.
         """
+        # Jitter before spawning: rate-limits rapid fork cycles and guarantees
+        # a lock-free window so operator unloads can break a crash loop
+        await asyncio.sleep(random.uniform(0.5, 2.0))
         try:
             await self._start_worker()
         except Exception:
@@ -401,12 +415,20 @@ class InferencePool:
 
         if cleanup_errors:
             # Track cleanup failures
-            self._increment_cleanup_failure_metric(self.env_hash)
+            self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
             raise cleanup_errors[0]
 
     async def _close_workers(self):
         cleanup_errors = []
         for pid, worker in list(self._workers.items()):
+            # Remove from registry first so that the SIGCHLD handler's
+            # on_worker_stop call returns early (pid not in _workers),
+            # preventing duplicate cleanup
+            if pid in self._workers:
+                del self._workers[pid]
+            else:
+                continue
+
             # Best effort cleanup
             try:
                 await worker.stop()
@@ -436,9 +458,6 @@ class InferencePool:
                     f"for worker with PID {pid} on {self.name}",
                 )
                 cleanup_errors.extend(failures)
-
-        # Always clear all workers
-        self._workers.clear()
 
         if cleanup_errors:
             raise cleanup_errors[0]

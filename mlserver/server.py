@@ -77,10 +77,8 @@ class MLServer:
         on_model_load = [
             self._inference_pool_registry.load_model,
             self.add_custom_handlers,
-            load_batching,
         ]
         on_model_unload = [
-            unload_batching,
             self.remove_custom_handlers,
             self._inference_pool_registry.unload_model,
         ]

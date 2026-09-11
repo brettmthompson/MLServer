@@ -2,7 +2,7 @@ import asyncio
 
 from typing import cast
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from itertools import cycle
 from multiprocessing import Queue
 from concurrent.futures import ThreadPoolExecutor
@@ -139,6 +139,7 @@ class Dispatcher:
     def __init__(self, workers: dict[int, Worker], responses: Queue):
         self._responses = responses
         self._workers = workers
+        self._ready_workers = dict(workers)
         self._workers_round_robin = self._reset_round_robin()
         self._worker_starting_lock = asyncio.Lock()
         self._active = False
@@ -147,11 +148,15 @@ class Dispatcher:
         self._async_responses = AsyncResponses()
 
     def _reset_round_robin(self) -> Iterator[int]:
-        worker_pids = list(self._workers.keys())
+        worker_pids = list(self._ready_workers.keys())
         self._workers_round_robin = cycle(worker_pids)
         return self._workers_round_robin
 
-    async def on_worker_start(self, worker: Worker, init_coro=None):
+    async def on_worker_start(
+        self,
+        worker: Worker,
+        init_coro: Awaitable[None] | None = None,
+    ):
         """
         Handler for workers who have just started but are still not ready to
         receive traffic. Holds the lock throughout init_coro (Phase 1/2 model
@@ -169,6 +174,7 @@ class Dispatcher:
         """
         Handler for workers who are now ready to receive traffic.
         """
+        self._ready_workers[worker.pid] = worker  # type: ignore
         self._reset_round_robin()
 
     def on_worker_stop(self, worker: Worker, exit_code: int):
@@ -180,6 +186,9 @@ class Dispatcher:
         pid = worker.pid
         if pid in self._workers:
             del self._workers[pid]
+
+        if pid in self._ready_workers:
+            del self._ready_workers[pid]
 
         self._reset_round_robin()
         self._async_responses.cancel(worker, exit_code)
@@ -232,7 +241,7 @@ class Dispatcher:
             worker_pid = next(self._workers_round_robin)
         except StopIteration:
             raise NoWorkersAvailable() from None
-        return self._workers[worker_pid], worker_pid
+        return self._ready_workers[worker_pid], worker_pid
 
     async def dispatch_update(
         self, model_update: ModelUpdateMessage
@@ -279,6 +288,7 @@ class Dispatcher:
         return await self._async_responses.schedule_and_wait(worker_update, worker)
 
     async def stop(self):
+        self._ready_workers.clear()
         self._executor.shutdown()
         if self._process_responses_task is not None:
             await cancel_task(self._process_responses_task)

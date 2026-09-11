@@ -86,10 +86,11 @@ class InferencePoolRegistry:
             # Loop to reap all stopped children — SIGCHLD signals can coalesce,
             # so a single signal may represent multiple stopped workers.
             while True:
-                pid, exit_code = os.waitpid(-1, os.WNOHANG)
+                pid, wait_status = os.waitpid(-1, os.WNOHANG)
                 if pid == 0:
                     # No more stopped children
                     break
+                exit_code = os.waitstatus_to_exitcode(wait_status)
                 if exit_code == 0:
                     # Clean exit — no crash recovery needed
                     continue
@@ -179,6 +180,7 @@ class InferencePoolRegistry:
             if inference_pool_gid not in self._pools:
                 self._pools[inference_pool_gid] = InferencePool(
                     self._settings,
+                    pool_gid=inference_pool_gid,
                     on_worker_stop=self._on_worker_stop,
                     on_worker_load=self._on_worker_load,
                     on_worker_unload=self._on_worker_unload,
@@ -296,7 +298,7 @@ class InferencePoolRegistry:
             loaded = await pool.load_model(model)
         except Exception:
             try:
-                await self._close_pool_if_empty(pool, model)
+                await self._close_pool_if_empty(pool)
             except Exception:
                 pass
             raise
@@ -321,23 +323,22 @@ class InferencePoolRegistry:
             unloaded = await pool.unload_model(model)
         finally:
             try:
-                await self._close_pool_if_empty(pool, model)
+                await self._close_pool_if_empty(pool)
             except Exception:
                 pass
 
         return unloaded
 
-    async def _close_pool_if_empty(self, pool: InferencePool, model: MLModel) -> None:
+    async def _close_pool_if_empty(self, pool: InferencePool) -> None:
         if pool == self._default_pool or not pool.empty():
             return
 
         if pool.env_hash:
             logger.info(f"Inference pool with hash '{pool.env_hash}' is now empty")
             await self._close_pool(pool.env_hash)
-        elif model.settings.parameters and model.settings.parameters.inference_pool_gid:
-            gid = model.settings.parameters.inference_pool_gid
-            logger.info(f"Inference pool with GID '{gid}' is now empty")
-            await self._close_pool(gid)
+        elif pool.pool_gid:
+            logger.info(f"Inference pool with GID '{pool.pool_gid}' is now empty")
+            await self._close_pool(pool.pool_gid)
 
     async def close(self):
         # Reset signal handler

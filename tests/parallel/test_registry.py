@@ -494,3 +494,62 @@ async def test_same_gid_pool_cleanup_multi_model(
     await inference_pool_registry.unload_model(loaded_b)
     assert shared_gid not in inference_pool_registry._pools
     assert len(inference_pool_registry._pools) == 0
+
+
+async def test_reload_model_same_gid(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    """Reloading a model with the same GID reuses the same inference pool."""
+    settings = deepcopy(sum_model_settings)
+    assert settings.parameters is not None
+    settings.parameters.inference_pool_gid = "reload-gid"
+
+    old_model = await inference_pool_registry.load_model(SumModel(settings))
+    assert len(inference_pool_registry._pools) == 1
+    assert "reload-gid" in inference_pool_registry._pools
+
+    new_model = await inference_pool_registry.load_model(SumModel(settings))
+    assert len(inference_pool_registry._pools) == 1
+    assert "reload-gid" in inference_pool_registry._pools
+
+    assert old_model != new_model
+
+    await inference_pool_registry.unload_model(old_model)
+    assert len(inference_pool_registry._pools) == 1
+    assert "reload-gid" in inference_pool_registry._pools
+
+    await inference_pool_registry.unload_model(new_model)
+    assert len(inference_pool_registry._pools) == 0
+
+
+async def test_reload_model_different_gid(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    """Reloading a model with a different GID loads it into the new pool
+    and removes it from the old pool."""
+    settings_gid1 = deepcopy(sum_model_settings)
+    assert settings_gid1.parameters is not None
+    settings_gid1.parameters.inference_pool_gid = "gid-1"
+
+    settings_gid2 = deepcopy(sum_model_settings)
+    assert settings_gid2.parameters is not None
+    settings_gid2.parameters.inference_pool_gid = "gid-2"
+
+    old_model = await inference_pool_registry.load_model(SumModel(settings_gid1))
+    assert len(inference_pool_registry._pools) == 1
+    assert "gid-1" in inference_pool_registry._pools
+
+    new_model = await inference_pool_registry.load_model(SumModel(settings_gid2))
+    assert len(inference_pool_registry._pools) == 2
+    assert "gid-2" in inference_pool_registry._pools
+
+    assert old_model != new_model
+
+    await inference_pool_registry.unload_model(old_model)
+    assert len(inference_pool_registry._pools) == 1
+    assert "gid-2" in inference_pool_registry._pools
+
+    await inference_pool_registry.unload_model(new_model)
+    assert len(inference_pool_registry._pools) == 0
