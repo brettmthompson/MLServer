@@ -125,6 +125,7 @@ class MLServer:
         servers_task = asyncio.gather(*servers)
 
         tasks = []
+        primary_error: BaseException | None = None
         try:
             tasks = [
                 asyncio.create_task(self._model_registry.load(model_settings))
@@ -133,17 +134,31 @@ class MLServer:
             await asyncio.gather(*tasks)
             # Mark startup complete only if all models loaded successfully
             self._model_registry.startup_complete()
-        except Exception:
-            # If one of the models failed to load during startup, shutdown the
-            # server gracefully
-            logger.exception("Some of the models failed to load during startup!")
+            # Keep the server tasks alive until stop() is called. Shielding
+            # ensures cancellation reaches this handler instead of cancelling
+            # the transport tasks directly.
+            await asyncio.shield(servers_task)
+        except (Exception, asyncio.CancelledError) as start_error:
+            primary_error = start_error
+            if isinstance(start_error, asyncio.CancelledError):
+                if self._model_registry.is_startup_complete:
+                    logger.info("Server was cancelled. Shutting down")
+                else:
+                    logger.info("Server startup was cancelled. Shutting down")
+            elif self._model_registry.is_startup_complete:
+                logger.exception("A server task failed. Shutting down")
+            else:
+                logger.exception(
+                    "Some models failed to load during startup. Shutting down."
+                )
 
             # Explicitly cancel remaining tasks
             for task in tasks:
                 if not task.done():
                     task.cancel()
 
-            # Wait for cancellations to propagate
+            # Wait for model-operation cancellation to settle before stopping
+            # the resources those operations may be using.
             await asyncio.gather(*tasks, return_exceptions=True)
 
             try:
@@ -155,7 +170,18 @@ class MLServer:
                 )
             raise  # Re-raise to signal startup failure to caller
         finally:
-            await servers_task
+            # Join the transport tasks after normal shutdown or startup
+            # cleanup.
+            try:
+                await servers_task
+            except (Exception, asyncio.CancelledError) as server_error:
+                if primary_error is None:
+                    raise
+
+                if isinstance(server_error, Exception):
+                    logger.exception(
+                        "A server task failed while handling an earlier error"
+                    )
 
     async def add_custom_handlers(self, model: MLModel) -> MLModel:
         await self._rest_server.add_custom_handlers(model)

@@ -291,6 +291,7 @@ async def test_server_keeps_startup_incomplete_after_load_failure(
     settings: Settings,
     load_error_model_settings: ModelSettings,
     prometheus_registry,
+    mocker,
 ):
     """
     Test that server.start() does NOT complete startup loading when model
@@ -299,22 +300,41 @@ async def test_server_keeps_startup_incomplete_after_load_failure(
     race condition window.
     """
     from mlserver import MLServer
-    from mlserver.errors import ModelNotFound
+    from mlserver.errors import MLServerError, ModelNotFound
 
     server = MLServer(settings)
+    transports_released = asyncio.Event()
+
+    async def transport():
+        await transports_released.wait()
+
+    async def stop_transport(*args, **kwargs):
+        return None
+
+    original_stop = server.stop
+
+    async def stop(*args, **kwargs):
+        transports_released.set()
+        await original_stop(*args, **kwargs)
+
+    mocker.patch.object(server._rest_server, "start", new=transport)
+    mocker.patch.object(server._rest_server, "stop", new=stop_transport)
+    mocker.patch.object(server._grpc_server, "start", new=transport)
+    mocker.patch.object(server._grpc_server, "stop", new=stop_transport)
+    if server._metrics_server:
+        mocker.patch.object(server._metrics_server, "start", new=transport)
+        mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
+    if server._kafka_server:
+        mocker.patch.object(server._kafka_server, "start", new=transport)
+        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
+    mocker.patch.object(server, "stop", new=stop)
 
     # Start server with failing model - triggers shutdown
     server_task = asyncio.create_task(server.start([load_error_model_settings]))
 
-    # Wait for startup to complete (may succeed or raise during shutdown)
-    try:
+    # The original model-load error must be preserved through shutdown.
+    with pytest.raises(MLServerError, match="something really bad happened"):
         await server_task
-    except asyncio.CancelledError:
-        pytest.fail("Server task was cancelled unexpectedly")
-    except Exception:
-        # Exceptions during shutdown are acceptable (e.g., cleanup errors)
-        # We only care that startup completed and registry state is correct
-        pass
 
     # Verify task actually completed (not hanging)
     assert server_task.done(), "Server startup task did not complete"
@@ -325,6 +345,123 @@ async def test_server_keeps_startup_incomplete_after_load_failure(
 
     # Should still be False (startup failed)
     assert not server._model_registry.is_startup_complete
+
+
+async def test_server_startup_cancellation_waits_for_model_load_cleanup(
+    settings: Settings,
+    sum_model_settings: ModelSettings,
+    prometheus_registry,
+    mocker,
+):
+    from mlserver import MLServer
+
+    server = MLServer(settings)
+    load_started = asyncio.Event()
+    load_cancelled = asyncio.Event()
+    release_load = asyncio.Event()
+    load_settled = asyncio.Event()
+    transports_released = asyncio.Event()
+
+    async def load(_model_settings: ModelSettings):
+        load_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            load_cancelled.set()
+            await release_load.wait()
+            load_settled.set()
+
+    async def transport():
+        await transports_released.wait()
+
+    async def stop_transport(*args, **kwargs):
+        return None
+
+    original_stop = server.stop
+
+    async def stop(*args, **kwargs):
+        transports_released.set()
+        await original_stop(*args, **kwargs)
+
+    mocker.patch.object(server._model_registry, "load", new=load)
+    mocker.patch.object(server._rest_server, "start", new=transport)
+    mocker.patch.object(server._rest_server, "stop", new=stop_transport)
+    mocker.patch.object(server._grpc_server, "start", new=transport)
+    mocker.patch.object(server._grpc_server, "stop", new=stop_transport)
+    if server._metrics_server:
+        mocker.patch.object(server._metrics_server, "start", new=transport)
+        mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
+    if server._kafka_server:
+        mocker.patch.object(server._kafka_server, "start", new=transport)
+        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
+    mocker.patch.object(server, "stop", new=stop)
+
+    startup_task = asyncio.create_task(server.start([sum_model_settings]))
+    await load_started.wait()
+    startup_task.cancel()
+    await load_cancelled.wait()
+    await asyncio.sleep(0)
+    assert not startup_task.done()
+    release_load.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await startup_task
+
+    assert load_settled.is_set()
+    assert transports_released.is_set()
+
+
+async def test_server_startup_preserves_primary_error_when_transport_fails(
+    settings: Settings,
+    sum_model_settings: ModelSettings,
+    prometheus_registry,
+    mocker,
+):
+    from mlserver import MLServer
+
+    server = MLServer(settings)
+    transports_released = asyncio.Event()
+    primary_error = RuntimeError("model startup failed")
+    secondary_error = RuntimeError("transport failed")
+
+    async def load(_model_settings: ModelSettings):
+        raise primary_error
+
+    async def failing_transport():
+        await transports_released.wait()
+        raise secondary_error
+
+    async def transport():
+        await transports_released.wait()
+
+    async def stop_transport(*args, **kwargs):
+        return None
+
+    original_stop = server.stop
+
+    async def stop(*args, **kwargs):
+        transports_released.set()
+        await original_stop(*args, **kwargs)
+
+    mocker.patch.object(server._model_registry, "load", new=load)
+    mocker.patch.object(server._rest_server, "start", new=failing_transport)
+    mocker.patch.object(server._rest_server, "stop", new=stop_transport)
+    mocker.patch.object(server._grpc_server, "start", new=transport)
+    mocker.patch.object(server._grpc_server, "stop", new=stop_transport)
+    if server._metrics_server:
+        mocker.patch.object(server._metrics_server, "start", new=transport)
+        mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
+    if server._kafka_server:
+        mocker.patch.object(server._kafka_server, "start", new=transport)
+        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
+    mocker.patch.object(server, "stop", new=stop)
+
+    with pytest.raises(RuntimeError) as error:
+        await server.start([sum_model_settings])
+
+    assert error.value is primary_error
+    assert error.value is not secondary_error
+    assert transports_released.is_set()
 
 
 async def test_server_startup_with_no_models(
