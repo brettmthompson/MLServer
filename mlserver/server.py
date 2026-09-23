@@ -122,7 +122,7 @@ class MLServer:
         if self._kafka_server:
             servers.append(self._kafka_server.start())
 
-        servers_task = asyncio.gather(*servers)
+        server_tasks = [asyncio.create_task(server) for server in servers]
 
         tasks = []
         primary_error: BaseException | None = None
@@ -137,7 +137,7 @@ class MLServer:
             # Keep the server tasks alive until stop() is called. Shielding
             # ensures cancellation reaches this handler instead of cancelling
             # the transport tasks directly.
-            await asyncio.shield(servers_task)
+            await asyncio.shield(asyncio.gather(*server_tasks))
         except (Exception, asyncio.CancelledError) as start_error:
             primary_error = start_error
             if isinstance(start_error, asyncio.CancelledError):
@@ -168,20 +168,33 @@ class MLServer:
                 logger.error(
                     "Failed to stop server during startup cleanup", exc_info=True
                 )
+
+            # Stop may fail before signalling one or more transports. Cancel
+            # every unfinished task explicitly so a completed gather cannot
+            # leave a sibling transport blocked indefinitely.
+            for server_task in server_tasks:
+                if not server_task.done():
+                    server_task.cancel()
             raise  # Re-raise to signal startup failure to caller
         finally:
             # Join the transport tasks after normal shutdown or startup
             # cleanup.
-            try:
-                await servers_task
-            except (Exception, asyncio.CancelledError) as server_error:
-                if primary_error is None:
-                    raise
-
-                if isinstance(server_error, Exception):
-                    logger.exception(
-                        "A server task failed while handling an earlier error"
-                    )
+            if primary_error is None:
+                await asyncio.gather(*server_tasks)
+            else:
+                server_results = await asyncio.gather(
+                    *server_tasks, return_exceptions=True
+                )
+                for server_error in server_results:
+                    if isinstance(server_error, Exception):
+                        logger.error(
+                            "A server task failed while handling an earlier error",
+                            exc_info=(
+                                type(server_error),
+                                server_error,
+                                server_error.__traceback__,
+                            ),
+                        )
 
     async def add_custom_handlers(self, model: MLModel) -> MLModel:
         await self._rest_server.add_custom_handlers(model)

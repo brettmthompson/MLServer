@@ -464,6 +464,157 @@ async def test_server_startup_preserves_primary_error_when_transport_fails(
     assert transports_released.is_set()
 
 
+async def test_server_startup_cancels_transport_tasks_when_stop_fails(
+    settings: Settings,
+    sum_model_settings: ModelSettings,
+    prometheus_registry,
+    mocker,
+):
+    from mlserver import MLServer
+
+    server = MLServer(settings)
+    transport_count = (
+        2
+        + int(server._metrics_server is not None)
+        + int(server._kafka_server is not None)
+    )
+    transports_started = asyncio.Event()
+    transports_cancelled = asyncio.Event()
+    started_count = 0
+    cancelled_count = 0
+    primary_error = RuntimeError("model startup failed")
+    stop_error = RuntimeError("server stop failed")
+
+    async def load(_model_settings: ModelSettings):
+        await transports_started.wait()
+        raise primary_error
+
+    async def blocked_transport():
+        nonlocal started_count, cancelled_count
+        started_count += 1
+        if started_count == transport_count:
+            transports_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled_count += 1
+            if cancelled_count == transport_count:
+                transports_cancelled.set()
+
+    async def failing_stop(*args, **kwargs):
+        raise stop_error
+
+    async def stop_transport(*args, **kwargs):
+        return None
+
+    original_stop = server.stop
+    mocker.patch.object(server._model_registry, "load", new=load)
+    mocker.patch.object(server._rest_server, "start", new=blocked_transport)
+    mocker.patch.object(server._rest_server, "stop", new=stop_transport)
+    mocker.patch.object(server._grpc_server, "start", new=blocked_transport)
+    mocker.patch.object(server._grpc_server, "stop", new=stop_transport)
+    if server._metrics_server:
+        mocker.patch.object(server._metrics_server, "start", new=blocked_transport)
+        mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
+    if server._kafka_server:
+        mocker.patch.object(server._kafka_server, "start", new=blocked_transport)
+        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
+    mocker.patch.object(server, "stop", new=failing_stop)
+
+    try:
+        with pytest.raises(RuntimeError) as error:
+            await asyncio.wait_for(server.start([sum_model_settings]), timeout=1)
+    finally:
+        await original_stop()
+
+    assert transports_started.is_set()
+    assert transports_cancelled.is_set()
+    assert error.value is primary_error
+
+
+async def test_server_startup_cancels_blocked_transport_after_sibling_failure(
+    settings: Settings,
+    sum_model_settings: ModelSettings,
+    prometheus_registry,
+    mocker,
+):
+    from mlserver import MLServer
+
+    server = MLServer(settings)
+    transport_count = (
+        2
+        + int(server._metrics_server is not None)
+        + int(server._kafka_server is not None)
+    )
+    transports_started = asyncio.Event()
+    transport_failed = asyncio.Event()
+    transports_settled = asyncio.Event()
+    started_count = 0
+    settled_count = 0
+    transport_error = RuntimeError("transport failed")
+    stop_error = RuntimeError("server stop failed")
+
+    async def load(_model_settings: ModelSettings):
+        await transport_failed.wait()
+
+    async def mark_started():
+        nonlocal started_count
+        started_count += 1
+        if started_count == transport_count:
+            transports_started.set()
+
+    async def failing_transport():
+        nonlocal settled_count
+        await mark_started()
+        await transports_started.wait()
+        transport_failed.set()
+        try:
+            raise transport_error
+        finally:
+            settled_count += 1
+            if settled_count == transport_count:
+                transports_settled.set()
+
+    async def blocked_transport():
+        nonlocal settled_count
+        await mark_started()
+        try:
+            await asyncio.Future()
+        finally:
+            settled_count += 1
+            if settled_count == transport_count:
+                transports_settled.set()
+
+    async def failing_stop(*args, **kwargs):
+        raise stop_error
+
+    async def stop_transport(*args, **kwargs):
+        return None
+
+    original_stop = server.stop
+    mocker.patch.object(server._model_registry, "load", new=load)
+    mocker.patch.object(server._rest_server, "start", new=failing_transport)
+    mocker.patch.object(server._rest_server, "stop", new=stop_transport)
+    mocker.patch.object(server._grpc_server, "start", new=blocked_transport)
+    mocker.patch.object(server._grpc_server, "stop", new=stop_transport)
+    if server._metrics_server:
+        mocker.patch.object(server._metrics_server, "start", new=blocked_transport)
+        mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
+    if server._kafka_server:
+        mocker.patch.object(server._kafka_server, "start", new=blocked_transport)
+        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
+    mocker.patch.object(server, "stop", new=failing_stop)
+
+    try:
+        with pytest.raises(RuntimeError) as error:
+            await asyncio.wait_for(server.start([sum_model_settings]), timeout=1)
+    finally:
+        await original_stop()
+
+    assert transports_settled.is_set()
+    assert error.value is transport_error
+
+
 async def test_server_startup_with_no_models(
     settings: Settings,
     rest_client: RESTClient,
