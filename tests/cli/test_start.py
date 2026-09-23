@@ -468,6 +468,7 @@ async def test_server_startup_cancels_transport_tasks_when_stop_fails(
     settings: Settings,
     sum_model_settings: ModelSettings,
     prometheus_registry,
+    caplog,
     mocker,
 ):
     from mlserver import MLServer
@@ -530,12 +531,17 @@ async def test_server_startup_cancels_transport_tasks_when_stop_fails(
     assert transports_started.is_set()
     assert transports_cancelled.is_set()
     assert error.value is primary_error
+    assert not any(
+        "exception in shielded future" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 async def test_server_startup_cancels_blocked_transport_after_sibling_failure(
     settings: Settings,
     sum_model_settings: ModelSettings,
     prometheus_registry,
+    caplog,
     mocker,
 ):
     from mlserver import MLServer
@@ -613,6 +619,10 @@ async def test_server_startup_cancels_blocked_transport_after_sibling_failure(
 
     assert transports_settled.is_set()
     assert error.value is transport_error
+    assert not any(
+        "exception in shielded future" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 async def test_server_startup_with_no_models(
