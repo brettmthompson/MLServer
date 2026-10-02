@@ -8,7 +8,7 @@ Common questions about MLServer development, configuration, and troubleshooting.
 
 ### What inference protocol does MLServer implement?
 
-MLServer implements the [V2 Inference Protocol](https://kserve.github.io/website/latest/modelserving/data_plane/v2_protocol/) (also known as the Open Inference Protocol), originally developed by NVIDIA and KServe.
+MLServer implements the [V2 Inference Protocol](https://kserve.github.io/website/docs/concepts/architecture/data-plane/v2-protocol) (also known as the Open Inference Protocol), originally developed by NVIDIA and KServe.
 It is exposed over both REST (HTTP/1.1 + JSON) and gRPC (HTTP/2 + Protobuf) transports.
 
 ### What is the relationship between MLServer and KServe?
@@ -96,12 +96,6 @@ It is controlled by two settings in `model-settings.json`:
 - **`max_batch_time`** — Maximum seconds to wait for a full batch
 
 A batch is dispatched when either threshold is reached (whichever comes first).
-
-### How does response caching work?
-
-When `cache_enabled: true`, MLServer caches inference responses keyed on the serialized request payload.
-Cache is an in-memory LRU with configurable size (`cache_size`, default: 100).
-Individual models can opt out by setting `cache_enabled: false` in their `model-settings.json`.
 
 ---
 
