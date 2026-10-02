@@ -2,7 +2,7 @@ import asyncio
 from weakref import WeakValueDictionary
 
 from ..utils import defer_cancellation, with_operation_lock
-from ..settings import ModelSettings
+from ..settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from ..registry import MultiModelRegistry
 from ..repository import ModelRepository
 from ..errors import ModelNotFound, ModelUnloadError
@@ -21,12 +21,18 @@ def _model_key(model_settings: ModelSettings) -> tuple[str, str]:
 
 
 class ModelRepositoryHandlers:
-    def __init__(self, repository: ModelRepository, model_registry: MultiModelRegistry):
+    def __init__(
+        self,
+        repository: ModelRepository,
+        model_registry: MultiModelRegistry,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
+    ):
         self._operation_locks: WeakValueDictionary[str, asyncio.Lock] = (
             WeakValueDictionary()
         )
         self._repository = repository
         self._model_registry = model_registry
+        self._model_operation_timeout = model_operation_timeout
 
     async def index(self, payload: RepositoryIndexRequest) -> RepositoryIndexResponse:
         # Get models from repository (on disk)
@@ -116,7 +122,7 @@ class ModelRepositoryHandlers:
         return self._operation_locks.setdefault(name, asyncio.Lock())
 
     @with_operation_lock(lambda self, name: self._get_operation_lock(name))
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def load(self, name: str) -> bool:
         all_model_settings = await self._repository.find(name)
 
@@ -163,7 +169,7 @@ class ModelRepositoryHandlers:
         return True
 
     @with_operation_lock(lambda self, name: self._get_operation_lock(name))
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def unload(self, name: str) -> bool:
         await self._model_registry.unload(name)
 

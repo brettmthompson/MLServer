@@ -341,8 +341,7 @@ async def test_cancelled_load_waits_for_repository_operation_to_settle(
 
     assert not task.done()
     release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await task
 
     # The per-model lock was released after deferred cancellation settled.
     await model_repository_handlers.load(sum_model_settings.name)
@@ -371,8 +370,7 @@ async def test_cancelled_unload_waits_for_repository_operation_to_settle(
 
     assert not unload_task.done()
     release_unload.set()
-    with pytest.raises(asyncio.CancelledError):
-        await unload_task
+    await unload_task
 
     # The per-model lock was released after deferred cancellation settled.
     await model_repository_handlers.unload(sum_model_settings.name)

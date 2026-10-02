@@ -658,8 +658,7 @@ async def test_load_model_cancellation_settles_and_preserves_pool_state(
     assert not load_task.done()
 
     release_load.set()
-    with pytest.raises(asyncio.CancelledError):
-        await load_task
+    await load_task
 
     assert loaded_models == [model]
 
@@ -702,8 +701,7 @@ async def test_unload_model_cancellation_settles_and_clears_pool_state(
     assert not unload_task.done()
 
     release_unload.set()
-    with pytest.raises(asyncio.CancelledError):
-        await unload_task
+    await unload_task
 
     assert not loaded_models
 
@@ -729,10 +727,7 @@ async def test_load_model_with_hooks(
         with pytest.raises(Exception, match="test_hook_executed_in_worker"):
             await registry.load_model(sum_model)
     finally:
-        try:
-            await registry.close()
-        except Exception:
-            pass
+        await registry.close()
 
 
 def check_sklearn_version(response):
@@ -860,8 +855,14 @@ async def test_worker_stop(
     stopped_worker = workers[0]
     stopped_worker.kill()
 
-    # Give some time for worker to come up
-    await asyncio.sleep(5)
+    async def wait_for_replacement() -> None:
+        while (
+            len(default_pool._dispatcher._ready_workers) != settings.parallel_workers
+            or stopped_worker.pid in default_pool._dispatcher._ready_workers
+        ):
+            await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(wait_for_replacement(), timeout=5)
 
     # Ensure SIGCHD signal was handled
     assert f"with PID {stopped_worker.pid}" in caplog.text

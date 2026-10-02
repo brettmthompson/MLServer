@@ -38,23 +38,34 @@ async def _wait_for_workers(pool: InferencePool, expected: int):
 
 def test_workers_start(inference_pool: InferencePool, settings: Settings):
     assert len(inference_pool._workers) == settings.parallel_workers
+    assert (
+        inference_pool._dispatcher._model_operation_timeout
+        == settings.model_operation_timeout
+    )
+    assert (
+        inference_pool._dispatcher._worker_start_timeout
+        == settings.worker_start_timeout
+    )
 
     for worker_pid in inference_pool._workers:
         assert check_pid(worker_pid)
 
 
 async def test_on_worker_stop(
-    settings: Settings, inference_pool: InferencePool, sum_model: MLModel
+    settings: Settings, inference_pool: InferencePool, sum_model: MLModel, mocker
 ):
     # Ensure pool has some loaded models
     await inference_pool.load_model(sum_model)
 
     prev_workers = list(inference_pool._workers.values())
     stopped_worker = prev_workers[0]
+    close_queues = mocker.spy(stopped_worker, "close_queues")
 
     assert stopped_worker.pid is not None
+    stopped_worker.kill()
+    stopped_worker.join(settings.parallel_workers_timeout)
     await inference_pool.on_worker_stop(stopped_worker.pid, 23)
-    await stopped_worker.stop()
+    close_queues.assert_called_once_with()
 
     # Wait for replacement worker (started via create_task in on_worker_stop)
     await asyncio.wait_for(
@@ -459,10 +470,35 @@ async def test_start_worker_cancellation_settles_startup(
 
     assert not start_task.done()
     release_replay.set()
-    with pytest.raises(asyncio.CancelledError):
-        await start_task
+    await start_task
 
     assert worker.pid in inference_pool._dispatcher._ready_workers
+
+
+async def test_start_worker_replay_failure_kills_replacement(
+    inference_pool: InferencePool, mocker
+):
+    worker = SimpleNamespace(pid=987654)
+    worker.kill = mocker.Mock()
+    worker.exitcode = 0
+
+    async def stop_worker():
+        return None
+
+    worker.stop = stop_worker
+    worker.join = lambda _timeout: None
+
+    async def replay_worker(_worker):
+        raise RuntimeError("replay failed")
+
+    mocker.patch("mlserver.parallel.pool._spawn_worker", return_value=worker)
+    mocker.patch.object(inference_pool, "_replay_worker", new=replay_worker)
+
+    with pytest.raises(RuntimeError, match="replay failed"):
+        await inference_pool._start_worker()
+
+    worker.kill.assert_called_once_with()
+    assert worker.pid not in inference_pool._dispatcher._ready_workers
 
 
 async def test_load_model_cancellation_settles_and_preserves_tracking(
@@ -489,8 +525,7 @@ async def test_load_model_cancellation_settles_and_preserves_tracking(
     assert not load_task.done()
     release_dispatch.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await load_task
+    await load_task
 
     assert inference_pool.has_model(sum_model.settings)
 
@@ -521,8 +556,7 @@ async def test_reload_cancellation_settles_and_preserves_pending_state(
     assert not reload_task.done()
     release_dispatch.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await reload_task
+    await reload_task
 
     model_key = inference_pool._model_key(replacement.settings)
     assert inference_pool.has_model(sum_model.settings)
@@ -558,8 +592,7 @@ async def test_unload_model_cancellation_settles_and_clears_tracking(
     assert not unload_task.done()
     release_dispatch.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await unload_task
+    await unload_task
 
     assert inference_pool.empty()
 

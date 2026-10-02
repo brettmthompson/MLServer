@@ -328,7 +328,9 @@ class InferencePoolRegistry:
         return self._operation_locks.setdefault(key, asyncio.Lock())
 
     @with_operation_lock(lambda self, model: self._get_pool_lock(model, loading=True))
-    @defer_cancellation
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.model_operation_timeout
+    )
     async def load_model(self, model: MLModel) -> MLModel:
         if self._closing:
             raise InferencePoolUnavailable()
@@ -354,7 +356,9 @@ class InferencePoolRegistry:
         return loaded
 
     @with_operation_lock(lambda self, model: self._get_pool_lock(model))
-    @defer_cancellation
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.model_operation_timeout
+    )
     async def unload_model(self, model: MLModel) -> MLModel:
         if self._closing:
             raise InferencePoolUnavailable()

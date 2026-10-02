@@ -5,7 +5,6 @@ import asyncio
 import glob
 import json
 import sys
-import warnings
 
 from collections.abc import AsyncGenerator, Generator
 from filelock import FileLock
@@ -175,16 +174,6 @@ def uvloop_policy():
     # Replacing the policy from a function-scoped event_loop fixture prevents
     # pytest-asyncio from closing its replacement loop between tests.
     install_uvloop_event_loop()
-    yield
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return
-    if not loop.is_closed():
-        loop.close()
 
 
 @pytest.fixture

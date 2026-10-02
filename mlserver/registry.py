@@ -12,7 +12,7 @@ from .utils import defer_cancellation, with_operation_lock
 from weakref import WeakValueDictionary
 from .errors import ModelNotFound
 from .logging import logger
-from .settings import ModelSettings
+from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .metrics.context import SELDON_MODEL_NAME_LABEL, SELDON_MODEL_VERSION_LABEL
 
 from mlserver.errors import ModelLoadError, ModelUnloadError
@@ -103,6 +103,7 @@ class SingleModelRegistry:
         on_model_load: Sequence[ModelRegistryHook] = [],
         on_model_unload: Sequence[ModelRegistryHook] = [],
         model_initialiser: ModelInitialiser = model_initialiser,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
     ):
         self._operation_lock = asyncio.Lock()
         self._versions: dict[str, MLModel] = {}
@@ -113,6 +114,7 @@ class SingleModelRegistry:
         self._on_model_load = on_model_load
         self._on_model_unload = on_model_unload
         self._model_initialiser = model_initialiser
+        self._model_operation_timeout = model_operation_timeout
 
     @property
     def default(self) -> MLModel | None:
@@ -173,7 +175,7 @@ class SingleModelRegistry:
         return self._default
 
     @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def load(
         self, model_settings: ModelSettings, parallel: bool = False
     ) -> MLModel:
@@ -257,7 +259,7 @@ class SingleModelRegistry:
         return model
 
     @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def unload(self) -> None:
         """
         Unload all versions of this model. Always a fresh unload — never called
@@ -289,7 +291,7 @@ class SingleModelRegistry:
             self._clear_default()
 
     @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def unload_version(
         self, version: str | None = None, rollback: bool = False
     ) -> None:
@@ -451,6 +453,7 @@ class MultiModelRegistry:
         on_model_load: Sequence[ModelRegistryHook] = [],
         on_model_unload: Sequence[ModelRegistryHook] = [],
         model_initialiser: ModelInitialiser = model_initialiser,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
     ):
         # Locks outlive registry entries while any owner or waiter holds them.
         self._operation_locks: WeakValueDictionary[str, asyncio.Lock] = (
@@ -460,6 +463,7 @@ class MultiModelRegistry:
         self._on_model_load = on_model_load
         self._on_model_unload = on_model_unload
         self._model_initialiser = model_initialiser
+        self._model_operation_timeout = model_operation_timeout
         self._startup_complete = False
 
     @property
@@ -491,7 +495,7 @@ class MultiModelRegistry:
             model_settings.name
         )
     )
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def load(
         self, model_settings: ModelSettings, parallel: bool = False
     ) -> MLModel:
@@ -510,6 +514,7 @@ class MultiModelRegistry:
                 on_model_load=self._on_model_load,
                 on_model_unload=self._on_model_unload,
                 model_initialiser=self._model_initialiser,
+                model_operation_timeout=self._model_operation_timeout,
             )
         try:
             return await self._models[model_settings.name].load(
@@ -525,7 +530,7 @@ class MultiModelRegistry:
             raise
 
     @with_operation_lock(lambda self, name: self._get_operation_lock(name))
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def unload(self, name: str) -> None:
         """
         Unload all versions of a model and remove it from the registry.
@@ -544,7 +549,7 @@ class MultiModelRegistry:
     @with_operation_lock(
         lambda self, name, *args, **kwargs: self._get_operation_lock(name)
     )
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def unload_version(
         self, name: str, version: str | None = None, rollback: bool = False
     ) -> None:

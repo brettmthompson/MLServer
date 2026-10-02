@@ -84,6 +84,21 @@ async def test_model_hooks(
         callback.assert_called_once_with(sum_model)  # type: ignore[attr-defined]
 
 
+async def test_load_propagates_model_operation_timeout_to_single_registry(
+    sum_model_settings: ModelSettings,
+):
+    model_operation_timeout = 37
+    model_registry = MultiModelRegistry(model_operation_timeout=model_operation_timeout)
+
+    try:
+        await model_registry.load(sum_model_settings)
+
+        single_registry = model_registry._models[sum_model_settings.name]
+        assert single_registry._model_operation_timeout == model_operation_timeout
+    finally:
+        await model_registry.unload(sum_model_settings.name)
+
+
 async def test_reload_model(
     model_registry: MultiModelRegistry,
     sum_model_settings: ModelSettings,
@@ -341,8 +356,7 @@ async def test_cancelled_load_settles_and_marks_model_ready(
     assert not load_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await load_task
+    await load_task
 
     loaded_model = await model_registry.get_model(slow_model_settings.name)
     assert loaded_model.ready
@@ -372,8 +386,7 @@ async def test_cancelled_reload_settles_and_replaces_model(
     assert not reload_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await reload_task
+    await reload_task
 
     new_model = await model_registry.get_model(sum_model_settings.name)
     assert new_model is not old_model
@@ -402,8 +415,7 @@ async def test_unload_cancellation_settles_and_removes_model(
     assert not unload_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await unload_task
+    await unload_task
 
     with pytest.raises(ModelNotFound):
         await model_registry.get_model(sum_model.name)
@@ -431,8 +443,7 @@ async def test_unload_version_cancellation_settles_and_removes_model(
     assert not unload_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await unload_task
+    await unload_task
 
     with pytest.raises(ModelNotFound):
         await model_registry.get_model(sum_model.name)
@@ -461,8 +472,7 @@ async def test_single_model_registry_load_cancellation_settles(
     assert not load_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await load_task
+    await load_task
 
     model = await registry.get_model()
     assert model.ready
@@ -494,8 +504,7 @@ async def test_single_model_registry_reload_cancellation_settles(
     assert not reload_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await reload_task
+    await reload_task
 
     new_model = await registry.get_model()
     assert new_model is not old_model
@@ -526,8 +535,7 @@ async def test_single_model_registry_unload_cancellation_settles(
     assert not unload_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await unload_task
+    await unload_task
 
     assert registry.empty()
 
@@ -554,8 +562,7 @@ async def test_single_model_registry_unload_version_cancellation_settles(
     assert not unload_task.done()
     finish.set()
 
-    with pytest.raises(CancelledError):
-        await unload_task
+    await unload_task
 
     assert registry.empty()
 

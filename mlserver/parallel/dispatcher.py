@@ -20,6 +20,7 @@ from .errors import WorkerStop, NoWorkersAvailable
 from .worker import Worker
 from .logging import logger
 from .utils import END_OF_QUEUE, cancel_task
+from ..settings import DEFAULT_MODEL_OPERATION_TIMEOUT, DEFAULT_WORKER_START_TIMEOUT
 from .messages import (
     Message,
     ModelUpdateMessage,
@@ -141,9 +142,17 @@ class AsyncResponses:
 
 
 class Dispatcher:
-    def __init__(self, workers: dict[int, Worker], responses: Queue):
+    def __init__(
+        self,
+        workers: dict[int, Worker],
+        responses: Queue,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
+        worker_start_timeout: float = DEFAULT_WORKER_START_TIMEOUT,
+    ):
         self._responses = responses
         self._workers = workers
+        self._model_operation_timeout = model_operation_timeout
+        self._worker_start_timeout = worker_start_timeout
         self._ready_workers = dict(workers)
         self._workers_round_robin = self._reset_round_robin()
         self._worker_starting_lock = asyncio.Lock()
@@ -158,7 +167,7 @@ class Dispatcher:
         return self._workers_round_robin
 
     @with_operation_lock(lambda self, *args, **kwargs: self._worker_starting_lock)
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._worker_start_timeout)
     async def on_worker_start(
         self,
         worker: Worker,
@@ -248,7 +257,7 @@ class Dispatcher:
         return self._ready_workers[worker_pid], worker_pid
 
     @with_operation_lock(lambda self, *args, **kwargs: self._worker_starting_lock)
-    @defer_cancellation
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def dispatch_update(
         self, model_update: ModelUpdateMessage
     ) -> list[ModelResponseMessage]:

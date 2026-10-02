@@ -286,8 +286,7 @@ async def test_on_worker_start_defers_cancellation_until_initialization_finishes
     assert not start_task.done()
 
     release_init.set()
-    with pytest.raises(asyncio.CancelledError):
-        await start_task
+    await start_task
 
     assert dispatcher._workers[worker.pid] is worker
 
@@ -317,8 +316,7 @@ async def test_dispatch_update_defers_cancellation_until_broadcast_finishes(
     assert not update_task.done()
 
     release_dispatch.set()
-    with pytest.raises(asyncio.CancelledError):
-        await update_task
+    await update_task
 
 
 async def test_stop_cleans_up_response_processing(responses, mocker):

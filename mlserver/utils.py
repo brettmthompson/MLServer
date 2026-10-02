@@ -3,6 +3,7 @@ import uuid
 import asyncio
 import inspect
 import urllib.parse
+from contextvars import ContextVar
 
 from asyncio import Task
 from collections.abc import Awaitable, Callable, Coroutine
@@ -11,13 +12,18 @@ from functools import wraps
 
 from .logging import logger
 from .types import InferenceRequest, InferenceResponse, Parameters
-from .settings import ModelSettings
+from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .errors import InvalidModelURI
 from .version import __version__
 
 
 T = TypeVar("T")
 P = ParamSpec("P")
+
+
+_deferred_cancellation_active: ContextVar[bool] = ContextVar(
+    "deferred_cancellation_active", default=False
+)
 
 
 async def get_model_uri(
@@ -157,62 +163,69 @@ def get_normalized_version(version: str | None = None) -> str:
     return resolved_version.split("+", 1)[0]
 
 
-async def _defer_cancellation(operation: Awaitable[T]) -> T:
-    """Wait for an accepted operation to settle before propagating cancellation.
+async def _defer_cancellation(
+    operation: Awaitable[T], timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT
+) -> T:
+    """Wait for an operation to settle while deferring caller cancellation.
 
-    The operation runs in a shielded task so caller cancellation does not
-    interrupt it. If the caller is cancelled, wait for the task to finish,
-    log any operation failure, and then re-raise the caller's cancellation.
+    Caller cancellation is suppressed during the timeout window. If timeout expires,
+    the underlying operation is cancelled.
+
+    If the operation completes during the timeout window its result is returned or
+    any exception is raised. If timeout expires a ``TimeoutError`` is raised.
     """
+    operation = asyncio.wait_for(operation, timeout)
     task = asyncio.ensure_future(operation)
-    cancellation = None
     while not task.done():
         try:
             await asyncio.shield(task)
-        except asyncio.CancelledError as cancelled:
-            cancellation = cancelled
-        except Exception:
-            break
-    if cancellation is not None:
-        if not task.cancelled():
-            error = task.exception()
-            if error is not None:
-                logger.error(
-                    "Model operation failed after caller cancellation",
-                    exc_info=(type(error), error, error.__traceback__),
-                )
-        raise cancellation
+        except asyncio.CancelledError:
+            continue
     return task.result()
 
 
 def defer_cancellation(
-    method: Callable[P, Awaitable[T]],
-) -> Callable[P, Coroutine[Any, Any, T]]:
-    """Defer caller cancellation until an accepted operation has settled.
+    timeout: float | Callable[..., float] = DEFAULT_MODEL_OPERATION_TIMEOUT,
+) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Coroutine[Any, Any, T]]]:
+    """Apply one timeout and deferred-cancellation boundary to an operation.
 
-    Apply this inside :func:`with_operation_lock` so cancellation remains
-    immediate while waiting for the lock, then is deferred after the operation
-    has acquired the lock and begun changing lifecycle state.
+    Nested decorated calls reuse the outer boundary and timeout.
+    ``timeout`` may be a value or a callable resolved at invocation time.
     """
 
-    @wraps(method)
-    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
-        return await _defer_cancellation(method(*args, **kwargs))
+    def decorate(
+        operation_method: Callable[P, Awaitable[T]],
+    ) -> Callable[P, Coroutine[Any, Any, T]]:
+        @wraps(operation_method)
+        async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+            # Only the outermost operation owns the timeout and deferred
+            # cancellation. Nested decorated methods run inside that boundary.
+            if _deferred_cancellation_active.get():
+                return await operation_method(*args, **kwargs)
 
-    return wrapped
+            operation_timeout = timeout
+            if callable(operation_timeout):
+                operation_timeout = operation_timeout(*args, **kwargs)
+
+            active_token = _deferred_cancellation_active.set(True)
+            try:
+                return await _defer_cancellation(
+                    operation_method(*args, **kwargs), operation_timeout
+                )
+            finally:
+                _deferred_cancellation_active.reset(active_token)
+
+        return wrapped
+
+    return decorate
 
 
 def with_operation_lock(
     lock_for: Callable[..., asyncio.Lock | Awaitable[asyncio.Lock]],
 ) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Coroutine[Any, Any, T]]]:
-    """Acquire the operation lock before running the decorated method.
+    """Acquire an operation lock before running the decorated method.
 
-    ``lock_for`` is called for each invocation and may return a lock directly
-    or an awaitable that resolves to one.
-
-    Resolution and acquisition remain
-    cancellable. To defer cancellation after acceptance, compose this
-    decorator outside :func:`defer_cancellation`.
+    ``lock_for`` may return a lock directly or an awaitable.
     """
 
     def decorate(
