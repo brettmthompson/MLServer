@@ -324,9 +324,6 @@ async def test_server_keeps_startup_incomplete_after_load_failure(
     if server._metrics_server:
         mocker.patch.object(server._metrics_server, "start", new=transport)
         mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
-    if server._kafka_server:
-        mocker.patch.object(server._kafka_server, "start", new=transport)
-        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
     mocker.patch.object(server, "stop", new=stop)
 
     # Start server with failing model - triggers shutdown
@@ -395,9 +392,6 @@ async def test_server_startup_cancellation_waits_for_model_load_cleanup(
     if server._metrics_server:
         mocker.patch.object(server._metrics_server, "start", new=transport)
         mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
-    if server._kafka_server:
-        mocker.patch.object(server._kafka_server, "start", new=transport)
-        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
     mocker.patch.object(server, "stop", new=stop)
 
     startup_task = asyncio.create_task(server.start([sum_model_settings]))
@@ -459,9 +453,6 @@ async def test_server_startup_preserves_primary_model_error(
     if server._metrics_server:
         mocker.patch.object(server._metrics_server, "start", new=transport)
         mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
-    if server._kafka_server:
-        mocker.patch.object(server._kafka_server, "start", new=transport)
-        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
     mocker.patch.object(server, "stop", new=stop)
 
     with pytest.raises(RuntimeError) as error:
@@ -498,8 +489,6 @@ async def test_server_startup_preserves_primary_error_when_stop_is_cancelled(
     mocker.patch.object(server._grpc_server, "start", new=transport)
     if server._metrics_server:
         mocker.patch.object(server._metrics_server, "start", new=transport)
-    if server._kafka_server:
-        mocker.patch.object(server._kafka_server, "start", new=transport)
     mocker.patch.object(server, "stop", new=cancelled_stop)
 
     try:
@@ -520,11 +509,7 @@ async def test_server_startup_cancels_transport_tasks_when_resource_cleanup_fail
     from mlserver import MLServer
 
     server = MLServer(settings)
-    transport_count = (
-        2
-        + int(server._metrics_server is not None)
-        + int(server._kafka_server is not None)
-    )
+    transport_count = 2 + int(server._metrics_server is not None)
     transports_started = asyncio.Event()
     transports_cancelled = asyncio.Event()
     started_count = 0
@@ -553,8 +538,6 @@ async def test_server_startup_cancels_transport_tasks_when_resource_cleanup_fail
     mocker.patch.object(server._grpc_server, "start", new=blocked_transport)
     if server._metrics_server:
         mocker.patch.object(server._metrics_server, "start", new=blocked_transport)
-    if server._kafka_server:
-        mocker.patch.object(server._kafka_server, "start", new=blocked_transport)
 
     async def failing_stop_resources(*args, **kwargs):
         raise RuntimeError("resource cleanup failed")
@@ -590,11 +573,7 @@ async def test_server_startup_cleans_up_blocked_transport_after_sibling_failure(
         "close",
         new=mocker.AsyncMock(),
     )
-    transport_count = (
-        2
-        + int(server._metrics_server is not None)
-        + int(server._kafka_server is not None)
-    )
+    transport_count = 2 + int(server._metrics_server is not None)
     transports_started = asyncio.Event()
     transport_failed = asyncio.Event()
     transports_released = asyncio.Event()
@@ -645,9 +624,6 @@ async def test_server_startup_cleans_up_blocked_transport_after_sibling_failure(
     if server._metrics_server:
         mocker.patch.object(server._metrics_server, "start", new=blocked_transport)
         mocker.patch.object(server._metrics_server, "stop", new=stop_transport)
-    if server._kafka_server:
-        mocker.patch.object(server._kafka_server, "start", new=blocked_transport)
-        mocker.patch.object(server._kafka_server, "stop", new=stop_transport)
     try:
         with pytest.raises(RuntimeError) as error:
             await asyncio.wait_for(server.start([sum_model_settings]), timeout=1)

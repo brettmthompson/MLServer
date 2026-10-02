@@ -11,11 +11,7 @@ async def test_server_start_is_single_flight(mocker, prometheus_registry):
     transports_started = asyncio.Event()
     transports_released = asyncio.Event()
     started_count = 0
-    transport_count = (
-        2
-        + int(server._metrics_server is not None)
-        + int(server._kafka_server is not None)
-    )
+    transport_count = 2 + int(server._metrics_server is not None)
 
     async def transport():
         nonlocal started_count
@@ -31,7 +27,6 @@ async def test_server_start_is_single_flight(mocker, prometheus_registry):
         server._rest_server,
         server._grpc_server,
         server._metrics_server,
-        server._kafka_server,
     ):
         if transport_server is not None:
             mocker.patch.object(transport_server, "start", new=transport)
