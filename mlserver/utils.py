@@ -176,10 +176,22 @@ async def _defer_cancellation(
     """
     operation = asyncio.wait_for(operation, timeout)
     task = asyncio.ensure_future(operation)
+    caller = asyncio.current_task()
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
+            # This helper intentionally defers caller cancellation. Catching
+            # CancelledError does not clear asyncio's recorded requests, so
+            # clear every pending request before the operation resumes. A
+            # task can receive one CancelledError after multiple cancel() calls.
+            if (
+                caller is not None
+                and hasattr(caller, "cancelling")
+                and hasattr(caller, "uncancel")
+            ):
+                while caller.cancelling():
+                    caller.uncancel()
             continue
     return task.result()
 

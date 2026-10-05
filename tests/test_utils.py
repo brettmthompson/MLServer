@@ -157,6 +157,8 @@ async def test_defer_cancellation_waits_for_operation_to_settle():
     await task
 
     assert completed.is_set()
+    if hasattr(task, "cancelling"):
+        assert task.cancelling() == 0
 
 
 async def test_defer_cancellation_defers_repeated_cancellation():
@@ -182,6 +184,28 @@ async def test_defer_cancellation_defers_repeated_cancellation():
     await task
 
     assert completed.is_set()
+    if hasattr(task, "cancelling"):
+        assert task.cancelling() == 0
+
+
+async def test_defer_cancellation_clears_coalesced_requests():
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def operation() -> None:
+        started.set()
+        await finish.wait()
+
+    task = asyncio.create_task(defer_cancellation()(operation)())
+    await started.wait()
+    task.cancel()
+    task.cancel()
+    finish.set()
+
+    await task
+
+    if hasattr(task, "cancelling"):
+        assert task.cancelling() == 0
 
 
 async def test_defer_cancellation_propagates_failure_after_cancellation():
