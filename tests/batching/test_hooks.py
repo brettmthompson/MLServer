@@ -40,6 +40,32 @@ async def test_batching_predict_stream(
     assert "not supported for inference streaming" in caplog.records[0].message
 
 
+async def test_batching_default_predict_stream_bypasses_batcher(
+    text_model: MLModel, generate_request: InferenceRequest, mocker
+):
+    text_model.settings.max_batch_size = 10
+    text_model.settings.max_batch_time = 0.4
+    await load_batching(text_model)
+
+    batcher = AdaptiveBatcher.get_batcher(text_model)
+    assert batcher is not None
+    mocker.patch.object(
+        batcher,
+        "predict",
+        side_effect=AssertionError("default streaming entered adaptive batching"),
+    )
+
+    async def get_stream_request(request):
+        yield request
+
+    stream = text_model.predict_stream(get_stream_request(generate_request))
+    responses = [response async for response in stream]
+
+    assert len(responses) == 1
+    assert len(responses[0].outputs) == 1
+    assert not batcher._async_responses
+
+
 @pytest.mark.parametrize(
     "max_batch_size, max_batch_time",
     [
@@ -110,16 +136,12 @@ async def test_unload_batching_restores_predict_and_predict_stream_methods(
     assert AdaptiveBatcher.get_batcher(sum_model) is None
 
 
-async def test_load_batching_noop_for_parallel_model(sum_model: MLModel):
-    """load_batching must be a no-op for ParallelModel — batching is
-    installed on workers, not the main process."""
+async def test_load_batching_for_parallel_model(sum_model: MLModel):
+    """load_batching is installed on the main-process ParallelModel."""
     sum_model.settings.max_batch_size = 10
     sum_model.settings.max_batch_time = 0.4
 
     parallel_model = ParallelModel(sum_model, MagicMock())
-    original_predict = parallel_model.predict
-
     await load_batching(parallel_model)
 
-    assert parallel_model.predict == original_predict
-    assert AdaptiveBatcher.get_batcher(parallel_model) is None
+    assert AdaptiveBatcher.get_batcher(parallel_model) is not None
