@@ -49,20 +49,29 @@ async def test_batching_default_predict_stream_bypasses_batcher(
 
     batcher = AdaptiveBatcher.get_batcher(text_model)
     assert batcher is not None
-    mocker.patch.object(
+    predict_mock = mocker.patch.object(
         batcher,
         "predict",
-        side_effect=AssertionError("default streaming entered adaptive batching"),
+        wraps=batcher.predict,
     )
 
     async def get_stream_request(request):
         yield request
 
     stream = text_model.predict_stream(get_stream_request(generate_request))
-    responses = [response async for response in stream]
+    try:
+        response = await anext(stream)
 
-    assert len(responses) == 1
-    assert len(responses[0].outputs) == 1
+        assert len(response.outputs) == 1
+        predict_mock.assert_not_awaited()
+
+        await text_model.predict(generate_request)
+        predict_mock.assert_awaited_once_with(generate_request)
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
     assert not batcher._async_responses
 
 

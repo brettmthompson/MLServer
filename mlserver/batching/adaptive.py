@@ -251,12 +251,22 @@ def not_implemented_warning(
     async def _inner_stream(
         payload: AsyncIterator[InferenceRequest],
     ) -> AsyncIterator[InferenceResponse]:
-        token = _BypassAdaptiveBatchingForStreaming.set(True)
+        stream = aiter(f(payload))
         try:
-            async for response in f(payload):
+            while True:
+                token = _BypassAdaptiveBatchingForStreaming.set(True)
+                try:
+                    response = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                finally:
+                    _BypassAdaptiveBatchingForStreaming.reset(token)
+
                 yield response
         finally:
-            _BypassAdaptiveBatchingForStreaming.reset(token)
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     return _inner_stream
 
