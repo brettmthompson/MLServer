@@ -289,7 +289,9 @@ class BatchedRequests:
                         parameter_values[0] if is_scalar else parameter_values[idx]
                     )
                     if parameter_value != []:
-                        parameter_args[parameter_name] = str(parameter_value)
+                        parameter_args[parameter_name] = (
+                            parameter_value if is_scalar else str(parameter_value)
+                        )
                 except IndexError:
                     pass
             if "content_type" in merged_parameters.keys():

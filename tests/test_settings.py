@@ -56,6 +56,21 @@ def test_model_settings_parse_file_derives_name_for_relative_path(
     assert model_settings.name == tmp_path.name
 
 
+@pytest.mark.parametrize("name", [0, False, None, "   "])
+def test_model_settings_parse_file_rejects_invalid_name_instead_of_fallback(
+    tmp_path, name
+):
+    model_dir = tmp_path / "directory-model"
+    model_dir.mkdir()
+    settings_path = model_dir / "model-settings.json"
+    settings_path.write_text(
+        json.dumps({"name": name, "implementation": "tests.fixtures.SumModel"})
+    )
+
+    with pytest.raises(ValidationError):
+        ModelSettings.parse_file(str(settings_path))
+
+
 def test_settings_from_env(monkeypatch):
     http_port = 5000
     monkeypatch.setenv("mlserver_http_port", str(http_port))

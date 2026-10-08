@@ -228,17 +228,19 @@ class ModelInferRequestConverter:
         use_raw: bool = False,
     ) -> pb.ModelInferRequest:
         use_raw = use_raw or _requires_raw(type_object.inputs)
+        inputs = type_object.inputs
         if use_raw:
             # Extract the raw data in advance, to ensure the `data` field of
             # the input objects is empty
-            type_object.inputs, raw = extract_raw(type_object.inputs)  # type: ignore
+            inputs = [input.model_copy(deep=True) for input in type_object.inputs]
+            inputs, raw = extract_raw(inputs)  # type: ignore
 
         model_infer_request = pb.ModelInferRequest(
             model_name=model_name,
             model_version=model_version,
             inputs=[
                 InferInputTensorConverter.from_types(inp, include_contents=not use_raw)
-                for inp in type_object.inputs
+                for inp in inputs
             ],
         )
 
@@ -285,9 +287,11 @@ class InferInputTensorConverter:
     def from_types(
         cls, type_object: types.RequestInput, include_contents: bool = True
     ) -> pb.ModelInferRequest.InferInputTensor:
-        include_contents = (
-            include_contents and Datatype(type_object.datatype) != Datatype.FP16
-        )
+        is_fp16 = Datatype(type_object.datatype) == Datatype.FP16
+        if is_fp16 and include_contents:
+            raise InferenceError(
+                "Standalone FP16 tensor conversion requires raw contents"
+            )
         if include_contents:
             infer_input_tensor = pb.ModelInferRequest.InferInputTensor(
                 name=type_object.name,
@@ -441,10 +445,12 @@ class ModelInferResponseConverter:
         cls, type_object: types.InferenceResponse, use_raw: bool = False
     ) -> pb.ModelInferResponse:
         use_raw = use_raw or _requires_raw(type_object.outputs)
+        outputs = type_object.outputs
         if use_raw:
             # Extract the raw data in advance, to ensure the `data` field of
             # the output objects is empty
-            type_object.outputs, raw = extract_raw(type_object.outputs)  # type: ignore
+            outputs = [output.model_copy(deep=True) for output in type_object.outputs]
+            outputs, raw = extract_raw(outputs)  # type: ignore
 
         model_infer_response = pb.ModelInferResponse(
             model_name=type_object.model_name,
@@ -452,7 +458,7 @@ class ModelInferResponseConverter:
                 InferOutputTensorConverter.from_types(
                     output, include_contents=not use_raw
                 )
-                for output in type_object.outputs
+                for output in outputs
             ],
         )
 
@@ -494,9 +500,11 @@ class InferOutputTensorConverter:
     def from_types(
         cls, type_object: types.ResponseOutput, include_contents: bool = True
     ) -> pb.ModelInferResponse.InferOutputTensor:
-        include_contents = (
-            include_contents and Datatype(type_object.datatype) != Datatype.FP16
-        )
+        is_fp16 = Datatype(type_object.datatype) == Datatype.FP16
+        if is_fp16 and include_contents:
+            raise InferenceError(
+                "Standalone FP16 tensor conversion requires raw contents"
+            )
         if include_contents:
             infer_output_tensor = pb.ModelInferResponse.InferOutputTensor(
                 name=type_object.name,

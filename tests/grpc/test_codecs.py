@@ -201,7 +201,9 @@ def test_encode_output_tensor(
     decoded: Any, codec: InputCodec, expected: pb.ModelInferResponse.InferOutputTensor
 ):
     response_output = codec.encode_output(name="output-0", payload=decoded)
-    infer_output_tensor = InferOutputTensorConverter.from_types(response_output)
+    infer_output_tensor = InferOutputTensorConverter.from_types(
+        response_output, include_contents=response_output.datatype != "FP16"
+    )
     assert infer_output_tensor == expected
 
 

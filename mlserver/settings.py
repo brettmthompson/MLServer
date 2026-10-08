@@ -669,7 +669,7 @@ class ModelSettings(BaseSettings):
             # environment-only settings must still provide a name.
             if (
                 isinstance(obj, dict)
-                and not obj.get("name")
+                and ("name" not in obj or obj["name"] == "")
                 and _has_validation_error_for_field(exc, "name")
             ):
                 model_directory = os.path.dirname(path)

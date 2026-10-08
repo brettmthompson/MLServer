@@ -14,6 +14,7 @@ from mlserver.grpc.converters import (
     RepositoryIndexResponseConverter,
     ParametersConverter,
     InferTensorContentsConverter,
+    InferInputTensorConverter,
     InferOutputTensorConverter,
 )
 from mlserver.grpc import dataplane_pb2 as pb
@@ -232,8 +233,10 @@ def test_modelinferrequest_fp16_uses_raw_contents():
     )
 
     converted = ModelInferRequestConverter.from_types(request, model_name="model")
+    converted_again = ModelInferRequestConverter.from_types(request, model_name="model")
 
     assert converted.raw_input_contents == [values.tobytes()]
+    assert converted_again.raw_input_contents == [values.tobytes()]
     assert not converted.inputs[0].contents.ListFields()
 
 
@@ -252,8 +255,10 @@ def test_modelinferresponse_fp16_uses_raw_contents():
     )
 
     converted = ModelInferResponseConverter.from_types(response)
+    converted_again = ModelInferResponseConverter.from_types(response)
 
     assert converted.raw_output_contents == [values.tobytes()]
+    assert converted_again.raw_output_contents == [values.tobytes()]
     assert not converted.outputs[0].contents.ListFields()
 
 
@@ -420,9 +425,7 @@ def test_parameters_from_types(grpc_parameters):
                 name="output-0", datatype="FP16", shape=[2], data=[1.5, 2.0]
             ),
             pb.ModelInferResponse.InferOutputTensor(
-                name="output-0",
-                datatype="FP16",
-                shape=[2],
+                name="output-0", datatype="FP16", shape=[2]
             ),
         ),
     ],
@@ -431,8 +434,29 @@ def test_inferoutputtensor_from_types(
     response_output: types.ResponseOutput,
     expected: pb.ModelInferResponse.InferOutputTensor,
 ):
-    infer_output_tensor = InferOutputTensorConverter.from_types(response_output)
+    include_contents = response_output.datatype != "FP16"
+    infer_output_tensor = InferOutputTensorConverter.from_types(
+        response_output, include_contents=include_contents
+    )
     assert infer_output_tensor == expected
+
+
+def test_inferoutputtensor_rejects_standalone_fp16_conversion():
+    response_output = types.ResponseOutput(
+        name="output-0", datatype="FP16", shape=[2], data=[1.5, 2.0]
+    )
+
+    with pytest.raises(InferenceError, match="requires raw contents"):
+        InferOutputTensorConverter.from_types(response_output)
+
+
+def test_inferinputtensor_rejects_standalone_fp16_conversion():
+    request_input = types.RequestInput(
+        name="input-0", datatype="FP16", shape=[2], data=[1.5, 2.0]
+    )
+
+    with pytest.raises(InferenceError, match="requires raw contents"):
+        InferInputTensorConverter.from_types(request_input)
 
 
 def test_inferoutputtensor_rejects_fp16_typed_contents():
