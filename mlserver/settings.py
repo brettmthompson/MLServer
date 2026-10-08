@@ -655,9 +655,11 @@ class ModelSettings(BaseSettings):
 
     @classmethod
     def parse_file(cls, path: str) -> Self:  # type: ignore
+        path = os.path.abspath(path)
         with open(path, "r") as f:
             obj = json.load(f)
-            obj["_source"] = path
+            if isinstance(obj, dict):
+                obj["_source"] = path
 
         try:
             return cls.model_validate(obj)
@@ -665,14 +667,22 @@ class ModelSettings(BaseSettings):
             # Repository settings may omit the name and derive it from the
             # containing directory. Retry only for that file-backed case;
             # environment-only settings must still provide a name.
-            if not obj.get("name") and _has_validation_error_for_field(exc, "name"):
-                obj["name"] = os.path.basename(os.path.dirname(path))
+            if (
+                isinstance(obj, dict)
+                and not obj.get("name")
+                and _has_validation_error_for_field(exc, "name")
+            ):
+                model_directory = os.path.dirname(path)
+                obj["name"] = os.path.basename(model_directory)
                 return cls.model_validate(obj)
             raise
 
     @classmethod
     def model_validate(cls, obj: Any) -> Self:  # type: ignore
-        source = obj.pop("_source", None)
+        source = None
+        if isinstance(obj, dict):
+            obj = obj.copy()
+            source = obj.pop("_source", None)
         model_settings = super().model_validate(obj)
         if source:
             model_settings._source = source

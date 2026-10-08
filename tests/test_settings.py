@@ -36,13 +36,24 @@ def test_model_settings_parse_file_derives_name_from_directory(tmp_path):
     model_dir = tmp_path / "directory-model"
     model_dir.mkdir()
     settings_path = model_dir / "model-settings.json"
-    settings_path.write_text(
-        json.dumps({"implementation": "tests.fixtures.SumModel"})
-    )
+    settings_path.write_text(json.dumps({"implementation": "tests.fixtures.SumModel"}))
 
     model_settings = ModelSettings.parse_file(str(settings_path))
 
     assert model_settings.name == model_dir.name
+    assert model_settings._source == str(settings_path)
+
+
+def test_model_settings_parse_file_derives_name_for_relative_path(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    settings_path = tmp_path / "model-settings.json"
+    settings_path.write_text(json.dumps({"implementation": "tests.fixtures.SumModel"}))
+
+    model_settings = ModelSettings.parse_file("model-settings.json")
+
+    assert model_settings.name == tmp_path.name
 
 
 def test_settings_from_env(monkeypatch):

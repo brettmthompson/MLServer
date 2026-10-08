@@ -55,7 +55,9 @@ def _to_response_output(series: pd.Series, use_bytes: bool = True) -> ResponseOu
         processed_data, content_type = _process_bytes(data, use_bytes)
 
         if content_type is None:
-            data = [encode_to_json(elem, use_bytes) for elem in data]
+            # JSON disallows NaN, so normalize scalar NaNs before encoding the
+            # fallback representation. Keep None unchanged for string columns.
+            data = [encode_to_json(convert_nan(elem), use_bytes) for elem in data]
             content_type = PandasCodec.JsonContentType
         else:
             data = processed_data

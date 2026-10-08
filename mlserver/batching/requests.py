@@ -266,7 +266,11 @@ class BatchedRequests:
     def _split_parameters(
         self, response_output: ResponseOutput
     ) -> dict[str, Parameters]:
+        parameters = response_output.parameters
+        if parameters is None:
+            return {}
         merged_parameters = _get_parameters(response_output)
+        raw_parameters = parameters.model_dump()
         idx = 0
 
         all_parameters = {}
@@ -277,7 +281,13 @@ class BatchedRequests:
                 if parameter_name in ["content_type", "headers"]:
                     continue
                 try:
-                    parameter_value = parameter_values[idx]
+                    raw_value = raw_parameters[parameter_name]
+                    is_scalar = isinstance(raw_value, (str, bytes)) or not isinstance(
+                        raw_value, Iterable
+                    )
+                    parameter_value = (
+                        parameter_values[0] if is_scalar else parameter_values[idx]
+                    )
                     if parameter_value != []:
                         parameter_args[parameter_name] = str(parameter_value)
                 except IndexError:

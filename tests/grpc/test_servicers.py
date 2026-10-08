@@ -101,16 +101,17 @@ async def test_model_infer_fp16_round_trip(inference_service_stub):
                 datatype="FP16",
                 shape=[1, 3],
                 parameters={"content_type": pb.InferParameter(string_param="np")},
-                contents=pb.InferTensorContents(bytes_contents=[values.tobytes()]),
             )
         ],
+        raw_input_contents=[values.tobytes()],
     )
 
     response = await inference_service_stub.ModelInfer(request)
 
     output = response.outputs[0]
     assert output.datatype == "FP16"
-    decoded = np.frombuffer(output.contents.bytes_contents[0], dtype=np.float16)
+    assert not output.contents.ListFields()
+    decoded = np.frombuffer(response.raw_output_contents[0], dtype=np.float16)
     np.testing.assert_array_equal(decoded, np.array([values.sum()], dtype=np.float16))
 
 

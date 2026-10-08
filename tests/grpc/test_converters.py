@@ -4,6 +4,7 @@ import numpy as np
 from google.protobuf import json_format
 
 from mlserver import types
+from mlserver.types import Datatype
 from mlserver.grpc.converters import (
     ModelInferRequestConverter,
     ModelInferResponseConverter,
@@ -12,9 +13,11 @@ from mlserver.grpc.converters import (
     RepositoryIndexRequestConverter,
     RepositoryIndexResponseConverter,
     ParametersConverter,
+    InferTensorContentsConverter,
     InferOutputTensorConverter,
 )
 from mlserver.grpc import dataplane_pb2 as pb
+from mlserver.errors import InferenceError
 
 
 def test_servermetadataresponse_from_types(metadata_server_response):
@@ -139,7 +142,6 @@ def test_modelinferrequest_to_types(model_infer_request):
                         name="input-0",
                         datatype="FP32",
                         shape=[1],
-                        contents=pb.InferTensorContents(),
                     )
                 ],
                 raw_input_contents=[b"\x00\x00\xa8A"],
@@ -198,7 +200,6 @@ def test_modelinferrequest_from_types(use_raw, expected):
                         name="output-0",
                         datatype="FP32",
                         shape=[1],
-                        contents=pb.InferTensorContents(),
                     )
                 ],
                 raw_output_contents=[b"\x00\x00\xa8A"],
@@ -215,6 +216,104 @@ def test_modelinferresponse_from_types(inference_response, use_raw, expected):
     assert json_format.MessageToDict(model_infer_response) == json_format.MessageToDict(
         expected
     )
+
+
+def test_modelinferrequest_fp16_uses_raw_contents():
+    values = np.asarray([1.5, 2.0], dtype=np.float16)
+    request = types.InferenceRequest(
+        inputs=[
+            types.RequestInput(
+                name="input-0",
+                datatype="FP16",
+                shape=[2],
+                data=types.TensorData.model_validate(values.tolist()),
+            )
+        ]
+    )
+
+    converted = ModelInferRequestConverter.from_types(request, model_name="model")
+
+    assert converted.raw_input_contents == [values.tobytes()]
+    assert not converted.inputs[0].contents.ListFields()
+
+
+def test_modelinferresponse_fp16_uses_raw_contents():
+    values = np.asarray([1.5, 2.0], dtype=np.float16)
+    response = types.InferenceResponse(
+        model_name="model",
+        outputs=[
+            types.ResponseOutput(
+                name="output-0",
+                datatype="FP16",
+                shape=[2],
+                data=types.TensorData.model_validate(values.tolist()),
+            )
+        ],
+    )
+
+    converted = ModelInferResponseConverter.from_types(response)
+
+    assert converted.raw_output_contents == [values.tobytes()]
+    assert not converted.outputs[0].contents.ListFields()
+
+
+def test_modelinferrequest_mixed_datatypes_use_ordered_raw_contents():
+    fp16_values = np.asarray([1.5, 2.0], dtype=np.float16)
+    fp32_values = np.asarray([3.0], dtype=np.float32)
+    request = types.InferenceRequest(
+        inputs=[
+            types.RequestInput(
+                name="fp16-input",
+                datatype="FP16",
+                shape=[2],
+                data=types.TensorData.model_validate(fp16_values.tolist()),
+            ),
+            types.RequestInput(
+                name="fp32-input",
+                datatype="FP32",
+                shape=[1],
+                data=types.TensorData.model_validate(fp32_values.tolist()),
+            ),
+        ]
+    )
+
+    converted = ModelInferRequestConverter.from_types(request, model_name="model")
+
+    assert converted.raw_input_contents == [
+        fp16_values.tobytes(),
+        fp32_values.tobytes(),
+    ]
+    assert all(not tensor.contents.ListFields() for tensor in converted.inputs)
+
+
+def test_modelinferresponse_mixed_datatypes_use_ordered_raw_contents():
+    fp32_values = np.asarray([3.0], dtype=np.float32)
+    fp16_values = np.asarray([1.5, 2.0], dtype=np.float16)
+    response = types.InferenceResponse(
+        model_name="model",
+        outputs=[
+            types.ResponseOutput(
+                name="fp32-output",
+                datatype="FP32",
+                shape=[1],
+                data=types.TensorData.model_validate(fp32_values.tolist()),
+            ),
+            types.ResponseOutput(
+                name="fp16-output",
+                datatype="FP16",
+                shape=[2],
+                data=types.TensorData.model_validate(fp16_values.tolist()),
+            ),
+        ],
+    )
+
+    converted = ModelInferResponseConverter.from_types(response)
+
+    assert converted.raw_output_contents == [
+        fp32_values.tobytes(),
+        fp16_values.tobytes(),
+    ]
+    assert all(not tensor.contents.ListFields() for tensor in converted.outputs)
 
 
 @pytest.mark.parametrize(
@@ -324,9 +423,6 @@ def test_parameters_from_types(grpc_parameters):
                 name="output-0",
                 datatype="FP16",
                 shape=[2],
-                contents=pb.InferTensorContents(
-                    bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
-                ),
             ),
         ),
     ],
@@ -339,7 +435,7 @@ def test_inferoutputtensor_from_types(
     assert infer_output_tensor == expected
 
 
-def test_inferoutputtensor_fp16_to_types():
+def test_inferoutputtensor_rejects_fp16_typed_contents():
     tensor = pb.ModelInferResponse.InferOutputTensor(
         name="output-0",
         datatype="FP16",
@@ -349,9 +445,30 @@ def test_inferoutputtensor_fp16_to_types():
         ),
     )
 
-    output = InferOutputTensorConverter.to_types(tensor)
+    with pytest.raises(InferenceError, match="FP16 tensor contents must use raw"):
+        InferOutputTensorConverter.to_types(tensor)
 
-    assert output.data.root == [1.5, 2.0]
+
+def test_infertensorcontents_fp16_empty_to_types():
+    contents = pb.InferTensorContents(bytes_contents=[])
+
+    output = InferTensorContentsConverter.to_types(contents, datatype=Datatype.FP16)
+
+    assert output.root == []
+
+
+def test_infertensorcontents_fp16_invalid_length_to_types():
+    contents = pb.InferTensorContents(bytes_contents=[b"\x00"])
+
+    with pytest.raises(InferenceError, match="FP16 tensor contents must use raw"):
+        InferTensorContentsConverter.to_types(contents, datatype=Datatype.FP16)
+
+
+def test_infertensorcontents_fp16_from_types_requires_raw_contents():
+    with pytest.raises(InferenceError, match="FP16 tensor contents must use raw"):
+        InferTensorContentsConverter.from_types(
+            types.TensorData.model_validate([1.5, 2.0]), Datatype.FP16
+        )
 
 
 def test_repositoryindexrequest_to_types(grpc_repository_index_request):

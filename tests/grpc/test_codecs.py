@@ -139,9 +139,6 @@ def test_decode_infer_request(encoded: pb.ModelInferRequest, expected: Any):
                 name="output-0",
                 datatype="FP16",
                 shape=[2, 1],
-                contents=pb.InferTensorContents(
-                    bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
-                ),
                 parameters={
                     "content_type": pb.InferParameter(
                         string_param=NumpyCodec.ContentType
@@ -220,18 +217,6 @@ def test_encode_output_tensor(
             ),
             NumpyCodec,
             np.array([21.0]),
-        ),
-        (
-            pb.ModelInferRequest.InferInputTensor(
-                name="output-0",
-                datatype="FP16",
-                shape=[2],
-                contents=pb.InferTensorContents(
-                    bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
-                ),
-            ),
-            NumpyCodec,
-            np.array([1.5, 2.0], dtype=np.float16),
         ),
         (
             pb.ModelInferRequest.InferInputTensor(

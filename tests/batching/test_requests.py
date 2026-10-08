@@ -30,12 +30,16 @@ def test_get_parameters_preserves_scalar_values(value, expected):
     assert dict(_get_parameters(response_output)) == expected
 
 
-def test_split_response_preserves_scalar_parameter():
+def test_split_response_preserves_scalar_parameter_for_each_request():
     requests = {
         "request-1": InferenceRequest(
             id="request-1",
             inputs=[RequestInput(name="input", datatype="INT32", shape=[1], data=[1])],
-        )
+        ),
+        "request-2": InferenceRequest(
+            id="request-2",
+            inputs=[RequestInput(name="input", datatype="INT32", shape=[1], data=[2])],
+        ),
     }
     response = InferenceResponse(
         model_name="test-model",
@@ -53,6 +57,7 @@ def test_split_response_preserves_scalar_parameter():
     split = BatchedRequests(requests).split_response(response)
 
     assert split["request-1"].outputs[0].parameters.foo == "123"
+    assert split["request-2"].outputs[0].parameters.foo == "123"
 
 
 @pytest.mark.parametrize(

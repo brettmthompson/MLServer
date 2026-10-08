@@ -121,6 +121,17 @@ def test_can_encode(payload: Any, expected: bool):
             ),
         ),
         (
+            pd.Series(data=["text", {"key": "value"}, np.NaN], name="bar"),
+            True,
+            ResponseOutput(
+                name="bar",
+                shape=[3, 1],
+                data=[b'"text"', b'{"key":"value"}', b"null"],
+                datatype="BYTES",
+                parameters=Parameters(content_type=PandasCodec.JsonContentType),
+            ),
+        ),
+        (
             pd.Series(data=[[1, 2], [3, 4, 5]], name="bar"),
             True,
             ResponseOutput(
