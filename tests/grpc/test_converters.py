@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 
 from google.protobuf import json_format
 
@@ -315,6 +316,19 @@ def test_parameters_from_types(grpc_parameters):
                 ),
             ),
         ),
+        (
+            types.ResponseOutput(
+                name="output-0", datatype="FP16", shape=[2], data=[1.5, 2.0]
+            ),
+            pb.ModelInferResponse.InferOutputTensor(
+                name="output-0",
+                datatype="FP16",
+                shape=[2],
+                contents=pb.InferTensorContents(
+                    bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
+                ),
+            ),
+        ),
     ],
 )
 def test_inferoutputtensor_from_types(
@@ -323,6 +337,21 @@ def test_inferoutputtensor_from_types(
 ):
     infer_output_tensor = InferOutputTensorConverter.from_types(response_output)
     assert infer_output_tensor == expected
+
+
+def test_inferoutputtensor_fp16_to_types():
+    tensor = pb.ModelInferResponse.InferOutputTensor(
+        name="output-0",
+        datatype="FP16",
+        shape=[2],
+        contents=pb.InferTensorContents(
+            bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
+        ),
+    )
+
+    output = InferOutputTensorConverter.to_types(tensor)
+
+    assert output.data.root == [1.5, 2.0]
 
 
 def test_repositoryindexrequest_to_types(grpc_repository_index_request):

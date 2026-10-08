@@ -133,6 +133,23 @@ def test_decode_infer_request(encoded: pb.ModelInferRequest, expected: Any):
             ),
         ),
         (
+            np.array([1.5, 2.0], dtype=np.float16),
+            NumpyCodec,
+            pb.ModelInferResponse.InferOutputTensor(
+                name="output-0",
+                datatype="FP16",
+                shape=[2, 1],
+                contents=pb.InferTensorContents(
+                    bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
+                ),
+                parameters={
+                    "content_type": pb.InferParameter(
+                        string_param=NumpyCodec.ContentType
+                    )
+                },
+            ),
+        ),
+        (
             np.array([[b"\x01"], [b"\x02"]], dtype=bytes),
             NumpyCodec,
             pb.ModelInferResponse.InferOutputTensor(
@@ -207,6 +224,18 @@ def test_encode_output_tensor(
         (
             pb.ModelInferRequest.InferInputTensor(
                 name="output-0",
+                datatype="FP16",
+                shape=[2],
+                contents=pb.InferTensorContents(
+                    bytes_contents=[np.asarray([1.5, 2.0], dtype=np.float16).tobytes()]
+                ),
+            ),
+            NumpyCodec,
+            np.array([1.5, 2.0], dtype=np.float16),
+        ),
+        (
+            pb.ModelInferRequest.InferInputTensor(
+                name="output-0",
                 datatype="BYTES",
                 shape=[3],
                 contents=pb.InferTensorContents(
@@ -223,4 +252,7 @@ def test_decode_input_tensor(
 ):
     request_input = InferInputTensorConverter.to_types(encoded)
     decoded = codec.decode_input(request_input)
-    assert decoded == expected
+    if isinstance(expected, np.ndarray):
+        np.testing.assert_array_equal(decoded, expected)
+    else:
+        assert decoded == expected

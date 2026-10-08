@@ -1,5 +1,8 @@
 from typing import Any
 from collections.abc import Mapping
+
+import numpy as np
+
 from ..types import Datatype
 
 from . import dataplane_pb2 as pb
@@ -23,6 +26,13 @@ _FIELDS = {
     Datatype.FP64: "fp64_contents",
     Datatype.BYTES: "bytes_contents",
 }
+
+
+def _parse_datatype(value: str) -> Datatype | None:
+    try:
+        return Datatype(value)
+    except ValueError:
+        return None
 
 
 def _get_value(pb_object, default: Any | None = None) -> Any:
@@ -261,7 +271,9 @@ class InferInputTensorConverter:
             shape=list(pb_object.shape),
             datatype=pb_object.datatype,
             parameters=ParametersConverter.to_types(pb_object.parameters),
-            data=InferTensorContentsConverter.to_types(pb_object.contents),
+            data=InferTensorContentsConverter.to_types(
+                pb_object.contents, datatype=_parse_datatype(pb_object.datatype)
+            ),
         )
 
     @classmethod
@@ -359,8 +371,13 @@ class ParametersConverter:
 
 class InferTensorContentsConverter:
     @classmethod
-    def to_types(cls, pb_object: pb.InferTensorContents) -> types.TensorData:
+    def to_types(
+        cls, pb_object: pb.InferTensorContents, datatype: Datatype | None = None
+    ) -> types.TensorData:
         data = _get_value(pb_object, default=[])
+        if datatype == Datatype.FP16:
+            buffers = [data] if isinstance(data, bytes) else data
+            data = np.frombuffer(b"".join(buffers), dtype=np.float16).tolist()
         as_list = list(data)
         return types.TensorData(root=as_list)
 
@@ -374,6 +391,10 @@ class InferTensorContentsConverter:
     @classmethod
     def _get_contents(cls, type_object: types.TensorData, datatype: Datatype) -> dict:
         field = _FIELDS[datatype]
+        if datatype == Datatype.FP16:
+            data = getattr(type_object, "root", type_object)
+            data = np.asarray(data, dtype=np.float16).tobytes()
+            return {field: [data]}
         return {field: type_object}
 
 
@@ -448,7 +469,9 @@ class InferOutputTensorConverter:
             shape=list(pb_object.shape),
             datatype=pb_object.datatype,
             parameters=ParametersConverter.to_types(pb_object.parameters),
-            data=InferTensorContentsConverter.to_types(pb_object.contents),
+            data=InferTensorContentsConverter.to_types(
+                pb_object.contents, datatype=_parse_datatype(pb_object.datatype)
+            ),
         )
 
     @classmethod

@@ -6,9 +6,9 @@ from typing import Any
 from .base import RequestCodec, register_request_codec
 from .numpy import to_dtype, convert_nan, to_datatype
 from .json import decode_json_input_or_output, encode_to_json
-from .string import encode_str, StringCodec
+from .string import decode_str, encode_str, StringCodec
 from .utils import get_decoded_or_raw, InputOrOutput, inject_batch_dimension
-from .lists import ListElement
+from .lists import ListElement, as_list
 from ..types import (
     InferenceRequest,
     InferenceResponse,
@@ -27,7 +27,10 @@ def _to_series(input_or_output: InputOrOutput) -> pd.Series:
 
     payload = get_decoded_or_raw(input_or_output)
     if Datatype(input_or_output.datatype) == Datatype.BYTES:
-        # Don't convert the dtype of BYTES
+        if parameters and parameters.content_type == StringCodec.ContentType:
+            payload = getattr(payload, "root", payload)
+            payload = [decode_str(value) for value in as_list(payload)]
+        # Don't convert the dtype of other BYTES payloads
         return pd.Series(payload)
 
     if isinstance(payload, np.ndarray):
@@ -42,9 +45,10 @@ def _to_response_output(series: pd.Series, use_bytes: bool = True) -> ResponseOu
     data = series.tolist()
 
     # Replace NaN with null
-    has_nan = series.isnull().any()
-    if has_nan:
-        data = list(map(convert_nan, data))
+    if datatype != Datatype.BYTES:
+        has_nan = series.isnull().any()
+        if has_nan:
+            data = list(map(convert_nan, data))
 
     content_type = None
     if datatype == Datatype.BYTES:
@@ -81,7 +85,7 @@ def _process_bytes(
     content_type: str | None = StringCodec.ContentType
     for elem in data:
         converted = elem
-        if not isinstance(elem, (str, bytes)):
+        if elem is not None and not isinstance(elem, (str, bytes)):
             # There was a non-string element, so we can't determine a content
             # type
             content_type = None

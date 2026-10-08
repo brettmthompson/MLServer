@@ -55,6 +55,17 @@ def test_can_encode(payload: Any, expected: bool):
             ),
         ),
         (
+            pd.Series(data=["hey", None, "abc"], name="bar"),
+            False,
+            ResponseOutput(
+                name="bar",
+                shape=[3, 1],
+                data=["hey", None, "abc"],
+                datatype="BYTES",
+                parameters=Parameters(content_type=StringCodec.ContentType),
+            ),
+        ),
+        (
             pd.Series(data=["hey", "abc"], name="foo"),
             True,
             ResponseOutput(
@@ -96,6 +107,17 @@ def test_can_encode(payload: Any, expected: bool):
                 shape=[3, 1],
                 data=[4, None, 6],
                 datatype="FP64",
+            ),
+        ),
+        (
+            pd.Series(data=[[1, 2], None], name="bar"),
+            True,
+            ResponseOutput(
+                name="bar",
+                shape=[2, 1],
+                data=[b"[1,2]", b"null"],
+                datatype="BYTES",
+                parameters=Parameters(content_type=PandasCodec.JsonContentType),
             ),
         ),
         (
@@ -581,6 +603,20 @@ def test_encode_request(
                 ]
             ),
             pd.DataFrame({"a": [[1, 2, 3]], "b": ["hello world"]}),
+        ),
+        (
+            InferenceRequest(
+                inputs=[
+                    RequestInput(
+                        name="a",
+                        data=[b"value"],
+                        datatype="BYTES",
+                        shape=[1, 1],
+                        parameters=Parameters(content_type=StringCodec.ContentType),
+                    )
+                ]
+            ),
+            pd.DataFrame({"a": ["value"]}),
         ),
         (
             InferenceRequest(

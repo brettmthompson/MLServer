@@ -5,12 +5,44 @@ import sys
 import pytest
 import json
 from unittest.mock import patch
+from pydantic import ValidationError
 
 from mlserver.settings import CORSSettings, Settings, ModelSettings, ModelParameters
 from mlserver.repository import DEFAULT_MODEL_SETTINGS_FILENAME
 import mlserver.settings as mlserver_settings
 
 from .conftest import TESTDATA_PATH, TESTS_PATH
+
+
+def test_model_settings_rejects_empty_name():
+    with pytest.raises(ValidationError):
+        ModelSettings(name="", implementation="tests.fixtures.SumModel")
+
+
+def test_model_settings_rejects_whitespace_name():
+    with pytest.raises(ValidationError):
+        ModelSettings(name="   ", implementation="tests.fixtures.SumModel")
+
+
+def test_model_settings_requires_name_when_loaded_from_environment(monkeypatch):
+    monkeypatch.delenv("MLSERVER_MODEL_NAME", raising=False)
+    monkeypatch.setenv("MLSERVER_MODEL_IMPLEMENTATION", "tests.fixtures.SumModel")
+
+    with pytest.raises(ValidationError):
+        ModelSettings()
+
+
+def test_model_settings_parse_file_derives_name_from_directory(tmp_path):
+    model_dir = tmp_path / "directory-model"
+    model_dir.mkdir()
+    settings_path = model_dir / "model-settings.json"
+    settings_path.write_text(
+        json.dumps({"implementation": "tests.fixtures.SumModel"})
+    )
+
+    model_settings = ModelSettings.parse_file(str(settings_path))
+
+    assert model_settings.name == model_dir.name
 
 
 def test_settings_from_env(monkeypatch):

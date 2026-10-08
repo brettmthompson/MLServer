@@ -1,4 +1,5 @@
 from collections import defaultdict, OrderedDict
+from collections.abc import Iterable
 from typing import Any
 
 from ..types import (
@@ -23,7 +24,13 @@ def _get_parameters(payload: ResponseOutput) -> defaultdict[Any, Any]:
     for param_name, param_values in payload_parameters.items():
         if param_name in ["content_type", "headers"]:
             continue
-        for param_value in param_values:
+        values = (
+            [param_values]
+            if isinstance(param_values, (str, bytes))
+            or not isinstance(param_values, Iterable)
+            else param_values
+        )
+        for param_value in values:
             parameters[param_name].append(param_value)
     if "content_type" in payload_parameters.keys():
         parameters["content_type"] = payload_parameters["content_type"]

@@ -7,7 +7,52 @@ from mlserver.types import (
     InferenceResponse,
     Parameters,
 )
-from mlserver.batching.requests import BatchedRequests
+from mlserver.batching.requests import BatchedRequests, _get_parameters
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("123", {"foo": ["123"]}),
+        (["first", "second"], {"foo": ["first", "second"]}),
+        (("first", "second"), {"foo": ["first", "second"]}),
+    ],
+)
+def test_get_parameters_preserves_scalar_values(value, expected):
+    response_output = ResponseOutput(
+        name="foo",
+        datatype="INT32",
+        shape=[1],
+        data=[1],
+        parameters=Parameters(foo=value),
+    )
+
+    assert dict(_get_parameters(response_output)) == expected
+
+
+def test_split_response_preserves_scalar_parameter():
+    requests = {
+        "request-1": InferenceRequest(
+            id="request-1",
+            inputs=[RequestInput(name="input", datatype="INT32", shape=[1], data=[1])],
+        )
+    }
+    response = InferenceResponse(
+        model_name="test-model",
+        outputs=[
+            ResponseOutput(
+                name="output",
+                datatype="INT32",
+                shape=[1],
+                data=[1],
+                parameters=Parameters(foo="123"),
+            )
+        ],
+    )
+
+    split = BatchedRequests(requests).split_response(response)
+
+    assert split["request-1"].outputs[0].parameters.foo == "123"
 
 
 @pytest.mark.parametrize(

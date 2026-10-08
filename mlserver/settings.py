@@ -22,6 +22,7 @@ from pydantic import (
     Field,
     AliasChoices,
     field_validator,
+    ValidationError,
 )
 from pydantic import model_validator
 from pydantic._internal._validators import import_string
@@ -73,6 +74,11 @@ _BUILTIN_RUNTIME_IMPORT_PATH_ALIASES = {
     "mlserver_lightgbm.lightgbm.LightGBMModel": "mlserver_lightgbm.LightGBMModel",
     "mlserver_onnx.onnx.OnnxModel": "mlserver_onnx.OnnxModel",
 }
+
+
+def _has_validation_error_for_field(exc: ValidationError, field: str) -> bool:
+    """Return whether a Pydantic validation error targets a top-level field."""
+    return any(error.get("loc") == (field,) for error in exc.errors())
 
 
 def canonicalize_runtime_import_path(import_path: str) -> str:
@@ -652,7 +658,17 @@ class ModelSettings(BaseSettings):
         with open(path, "r") as f:
             obj = json.load(f)
             obj["_source"] = path
+
+        try:
             return cls.model_validate(obj)
+        except ValidationError as exc:
+            # Repository settings may omit the name and derive it from the
+            # containing directory. Retry only for that file-backed case;
+            # environment-only settings must still provide a name.
+            if not obj.get("name") and _has_validation_error_for_field(exc, "name"):
+                obj["name"] = os.path.basename(os.path.dirname(path))
+                return cls.model_validate(obj)
+            raise
 
     @classmethod
     def model_validate(cls, obj: Any) -> Self:  # type: ignore
@@ -737,8 +753,15 @@ class ModelSettings(BaseSettings):
             return params.version
         return None
 
-    name: str = ""
+    name: str
     """Name of the model."""
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Model name must not be blank or whitespace-only")
+        return value
 
     # Model metadata
     platform: str = ""
