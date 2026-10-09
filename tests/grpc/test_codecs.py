@@ -114,6 +114,38 @@ def test_decode_infer_request(encoded: pb.ModelInferRequest, expected: Any):
     pd.testing.assert_frame_equal(decoded, expected)
 
 
+@pytest.mark.parametrize("values", [["hello", "world"], ["hello", None, "world"]])
+def test_pandas_string_request_roundtrip_through_grpc(values):
+    dataframe = pd.DataFrame({"text": values})
+
+    encoded = PandasCodec.encode_request(dataframe)
+    grpc_request = ModelInferRequestConverter.from_types(encoded, model_name="my-model")
+    decoded_request = ModelInferRequestConverter.to_types(grpc_request)
+    decoded = PandasCodec.decode_request(decoded_request)
+
+    pd.testing.assert_frame_equal(decoded, dataframe)
+
+
+@pytest.mark.parametrize("use_raw", [False, True])
+def test_pandas_response_roundtrip_through_grpc(use_raw):
+    dataframe = pd.DataFrame(
+        {
+            "number": [1, 2, 3],
+            "text": ["hello", "世界", "café"],
+            "nullable_text": ["世界", None, "café"],
+            "binary": [b"\xff\xfe", b"\x00\x80", b""],
+        }
+    )
+
+    encoded = PandasCodec.encode_response("my-model", dataframe)
+    grpc_response = ModelInferResponseConverter.from_types(encoded, use_raw=use_raw)
+    transported = pb.ModelInferResponse.FromString(grpc_response.SerializeToString())
+    decoded_response = ModelInferResponseConverter.to_types(transported)
+    decoded = PandasCodec.decode_response(decoded_response)
+
+    pd.testing.assert_frame_equal(decoded, dataframe)
+
+
 @pytest.mark.parametrize(
     "decoded, codec, expected",
     [

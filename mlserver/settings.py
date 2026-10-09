@@ -76,9 +76,13 @@ _BUILTIN_RUNTIME_IMPORT_PATH_ALIASES = {
 }
 
 
-def _has_validation_error_for_field(exc: ValidationError, field: str) -> bool:
-    """Return whether a Pydantic validation error targets a top-level field."""
-    return any(error.get("loc") == (field,) for error in exc.errors())
+def _is_missing_or_empty_field_error(exc: ValidationError, field: str) -> bool:
+    """Return whether a field error represents a missing or empty value."""
+    return any(
+        error.get("loc") == (field,)
+        and (error.get("type") == "missing" or error.get("input") == "")
+        for error in exc.errors()
+    )
 
 
 def canonicalize_runtime_import_path(import_path: str) -> str:
@@ -667,11 +671,7 @@ class ModelSettings(BaseSettings):
             # Repository settings may omit the name and derive it from the
             # containing directory. Retry only for that file-backed case;
             # environment-only settings must still provide a name.
-            if (
-                isinstance(obj, dict)
-                and ("name" not in obj or obj["name"] == "")
-                and _has_validation_error_for_field(exc, "name")
-            ):
+            if isinstance(obj, dict) and _is_missing_or_empty_field_error(exc, "name"):
                 model_directory = os.path.dirname(path)
                 obj["name"] = os.path.basename(model_directory)
                 return cls.model_validate(obj)

@@ -4,6 +4,7 @@ import numpy as np
 from google.protobuf import json_format
 
 from mlserver import types
+from mlserver.codecs.numpy import NumpyCodec
 from mlserver.types import Datatype
 from mlserver.grpc.converters import (
     ModelInferRequestConverter,
@@ -219,18 +220,12 @@ def test_modelinferresponse_from_types(inference_response, use_raw, expected):
     )
 
 
-def test_modelinferrequest_fp16_uses_raw_contents():
-    values = np.asarray([1.5, 2.0], dtype=np.float16)
-    request = types.InferenceRequest(
-        inputs=[
-            types.RequestInput(
-                name="input-0",
-                datatype="FP16",
-                shape=[2],
-                data=types.TensorData.model_validate(values.tolist()),
-            )
-        ]
-    )
+@pytest.mark.parametrize("data", [[1.5, 2.0], [1.5, np.nan, 2.0]])
+def test_modelinferrequest_fp16_uses_raw_contents(data):
+    values = np.asarray([data], dtype=np.float16)
+    request_input = NumpyCodec.encode_input(name="input-0", payload=values)
+    original_data = request_input.data.model_copy(deep=True)
+    request = types.InferenceRequest(inputs=[request_input])
 
     converted = ModelInferRequestConverter.from_types(request, model_name="model")
     converted_again = ModelInferRequestConverter.from_types(request, model_name="model")
@@ -238,20 +233,21 @@ def test_modelinferrequest_fp16_uses_raw_contents():
     assert converted.raw_input_contents == [values.tobytes()]
     assert converted_again.raw_input_contents == [values.tobytes()]
     assert not converted.inputs[0].contents.ListFields()
+    decoded_request = ModelInferRequestConverter.to_types(converted)
+    decoded = NumpyCodec.decode_input(decoded_request.inputs[0])
+    np.testing.assert_array_equal(decoded, values)
+    assert decoded.dtype == values.dtype
+    assert request_input.data == original_data
 
 
-def test_modelinferresponse_fp16_uses_raw_contents():
-    values = np.asarray([1.5, 2.0], dtype=np.float16)
+@pytest.mark.parametrize("data", [[1.5, 2.0], [1.5, np.nan, 2.0]])
+def test_modelinferresponse_fp16_uses_raw_contents(data):
+    values = np.asarray([data], dtype=np.float16)
+    response_output = NumpyCodec.encode_output(name="output-0", payload=values)
+    original_data = response_output.data.model_copy(deep=True)
     response = types.InferenceResponse(
         model_name="model",
-        outputs=[
-            types.ResponseOutput(
-                name="output-0",
-                datatype="FP16",
-                shape=[2],
-                data=types.TensorData.model_validate(values.tolist()),
-            )
-        ],
+        outputs=[response_output],
     )
 
     converted = ModelInferResponseConverter.from_types(response)
@@ -260,9 +256,14 @@ def test_modelinferresponse_fp16_uses_raw_contents():
     assert converted.raw_output_contents == [values.tobytes()]
     assert converted_again.raw_output_contents == [values.tobytes()]
     assert not converted.outputs[0].contents.ListFields()
+    decoded_response = ModelInferResponseConverter.to_types(converted)
+    decoded = NumpyCodec.decode_output(decoded_response.outputs[0])
+    np.testing.assert_array_equal(decoded, values)
+    assert decoded.dtype == values.dtype
+    assert response_output.data == original_data
 
 
-def test_modelinferrequest_mixed_datatypes_use_ordered_raw_contents():
+def test_modelinferrequest_mixed_datatypes_raw_roundtrip():
     fp16_values = np.asarray([1.5, 2.0], dtype=np.float16)
     fp32_values = np.asarray([3.0], dtype=np.float32)
     request = types.InferenceRequest(
@@ -279,19 +280,34 @@ def test_modelinferrequest_mixed_datatypes_use_ordered_raw_contents():
                 shape=[1],
                 data=types.TensorData.model_validate(fp32_values.tolist()),
             ),
+            types.RequestInput(
+                name="int-input", datatype="INT32", shape=[1, 2], data=[-1, 42]
+            ),
+            types.RequestInput(
+                name="bytes-input", datatype="BYTES", shape=[2], data=[b"\xff\x00", b""]
+            ),
         ]
     )
+    original = request.model_copy(deep=True)
 
     converted = ModelInferRequestConverter.from_types(request, model_name="model")
 
-    assert converted.raw_input_contents == [
+    assert converted.raw_input_contents[:2] == [
         fp16_values.tobytes(),
         fp32_values.tobytes(),
     ]
+    assert len(converted.raw_input_contents) == len(request.inputs)
     assert all(not tensor.contents.ListFields() for tensor in converted.inputs)
+    transported = pb.ModelInferRequest.FromString(converted.SerializeToString())
+    decoded = ModelInferRequestConverter.to_types(transported)
+    assert decoded.inputs == original.inputs
+    assert request == original
+    fp16_decoded = NumpyCodec.decode_input(decoded.inputs[0])
+    np.testing.assert_array_equal(fp16_decoded, fp16_values)
+    assert fp16_decoded.dtype == fp16_values.dtype
 
 
-def test_modelinferresponse_mixed_datatypes_use_ordered_raw_contents():
+def test_modelinferresponse_mixed_datatypes_raw_roundtrip():
     fp32_values = np.asarray([3.0], dtype=np.float32)
     fp16_values = np.asarray([1.5, 2.0], dtype=np.float16)
     response = types.InferenceResponse(
@@ -309,16 +325,34 @@ def test_modelinferresponse_mixed_datatypes_use_ordered_raw_contents():
                 shape=[2],
                 data=types.TensorData.model_validate(fp16_values.tolist()),
             ),
+            types.ResponseOutput(
+                name="int-output", datatype="INT32", shape=[1, 2], data=[-1, 42]
+            ),
+            types.ResponseOutput(
+                name="bytes-output",
+                datatype="BYTES",
+                shape=[2],
+                data=[b"\xff\x00", b""],
+            ),
         ],
     )
+    original = response.model_copy(deep=True)
 
     converted = ModelInferResponseConverter.from_types(response)
 
-    assert converted.raw_output_contents == [
+    assert converted.raw_output_contents[:2] == [
         fp32_values.tobytes(),
         fp16_values.tobytes(),
     ]
+    assert len(converted.raw_output_contents) == len(response.outputs)
     assert all(not tensor.contents.ListFields() for tensor in converted.outputs)
+    transported = pb.ModelInferResponse.FromString(converted.SerializeToString())
+    decoded = ModelInferResponseConverter.to_types(transported)
+    assert decoded.outputs == original.outputs
+    assert response == original
+    fp16_decoded = NumpyCodec.decode_output(decoded.outputs[1])
+    np.testing.assert_array_equal(fp16_decoded, fp16_values)
+    assert fp16_decoded.dtype == fp16_values.dtype
 
 
 @pytest.mark.parametrize(

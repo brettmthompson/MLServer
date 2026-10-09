@@ -54,7 +54,9 @@ def _to_response_output(series: pd.Series, use_bytes: bool = True) -> ResponseOu
     if datatype == Datatype.BYTES:
         processed_data, content_type = _process_bytes(data, use_bytes)
 
-        if content_type is None:
+        if content_type is None and not all(
+            isinstance(elem, (str, bytes)) for elem in data
+        ):
             # JSON disallows NaN, so normalize scalar NaNs before encoding the
             # fallback representation. Keep None unchanged for string columns.
             data = [encode_to_json(convert_nan(elem), use_bytes) for elem in data]
@@ -87,11 +89,11 @@ def _process_bytes(
     content_type: str | None = StringCodec.ContentType
     for elem in data:
         converted = elem
-        if elem is not None and not isinstance(elem, (str, bytes)):
+        if not isinstance(elem, str):
             # There was a non-string element, so we can't determine a content
             # type
             content_type = None
-        elif isinstance(elem, str) and use_bytes:
+        elif use_bytes:
             converted = encode_str(elem)
 
         processed.append(converted)
