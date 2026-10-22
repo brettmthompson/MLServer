@@ -1,10 +1,11 @@
-import time
 import asyncio
+import time
 from contextvars import ContextVar
 
 from asyncio import Future, Queue, wait_for, Task
 from functools import partial, wraps
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from fastapi import status
 
@@ -21,8 +22,8 @@ from .. import metrics
 from .requests import BatchedRequests
 
 _AdaptiveBatchingAttr = "__adaptive_batching__"
-_BypassAdaptiveBatchingForStreaming = ContextVar(
-    "bypass_adaptive_batching_for_streaming", default=False
+_AdaptiveBatcherStreamingTask: ContextVar[Task[Any] | None] = ContextVar(
+    "adaptive_batcher_streaming_task", default=None
 )
 
 
@@ -183,11 +184,14 @@ class AdaptiveBatcher:
     async def _batch_requests(self) -> AsyncIterator[BatchedRequests]:
         while not self._requests.empty():
             to_batch: dict[str, InferenceRequest] = {}
-            start = time.time()
-            timeout = self._max_batch_time
+            deadline = time.monotonic() + self._max_batch_time
 
             try:
                 while len(to_batch) < self._max_batch_size:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+
                     internal_id, inference_request = await self._get_request(
                         timeout=timeout
                     )
@@ -197,10 +201,6 @@ class AdaptiveBatcher:
                         continue
 
                     to_batch[internal_id] = inference_request
-
-                    # Update remaining timeout
-                    current = time.time()
-                    timeout = self._max_batch_time - (current - start)
             except asyncio.TimeoutError:
                 # NOTE: Hit timeout, continue
                 pass
@@ -224,7 +224,7 @@ def adaptive_batching(f: Callable[[InferenceRequest], Awaitable[InferenceRespons
 
     @wraps(f)
     async def _inner(payload: InferenceRequest) -> InferenceResponse:
-        if _BypassAdaptiveBatchingForStreaming.get():
+        if _AdaptiveBatcherStreamingTask.get() is asyncio.current_task():
             return await f(payload)
 
         batcher = _get_batcher(f)
@@ -254,19 +254,23 @@ def not_implemented_warning(
         stream = aiter(f(payload))
         try:
             while True:
-                token = _BypassAdaptiveBatchingForStreaming.set(True)
+                token = _AdaptiveBatcherStreamingTask.set(asyncio.current_task())
                 try:
                     response = await anext(stream)
                 except StopAsyncIteration:
                     return
                 finally:
-                    _BypassAdaptiveBatchingForStreaming.reset(token)
+                    _AdaptiveBatcherStreamingTask.reset(token)
 
                 yield response
         finally:
-            aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
-                await aclose()
+            token = _AdaptiveBatcherStreamingTask.set(asyncio.current_task())
+            try:
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            finally:
+                _AdaptiveBatcherStreamingTask.reset(token)
 
     return _inner_stream
 
