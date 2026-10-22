@@ -189,7 +189,7 @@ class AdaptiveBatcher:
             try:
                 while len(to_batch) < self._max_batch_size:
                     timeout = deadline - time.monotonic()
-                    if timeout <= 0:
+                    if timeout <= 0 and (to_batch or self._requests.empty()):
                         break
 
                     internal_id, inference_request = await self._get_request(

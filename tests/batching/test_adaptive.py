@@ -175,6 +175,34 @@ async def test_batch_requests_timeout_includes_cancelled_requests(
     assert observed_timeouts == pytest.approx([0.1, 0.02, 0.02, 0.02])
 
 
+async def test_batch_requests_drains_available_request_at_deadline(
+    adaptive_batcher: AdaptiveBatcher,
+    send_request: RequestSender,
+    mocker,
+):
+    """An expired deadline must not leave available requests undrained."""
+    adaptive_batcher._max_batch_size = 10
+    adaptive_batcher._max_batch_time = 0.1
+    internal_id, request = await send_request()
+    observed_timeouts = []
+
+    async def get_request(timeout):
+        observed_timeouts.append(timeout)
+        return adaptive_batcher._requests.get_nowait()
+
+    mocker.patch.object(adaptive_batcher, "_get_request", side_effect=get_request)
+    mocker.patch.object(
+        adaptive_module.time,
+        "monotonic",
+        side_effect=[0.0, 0.1, 0.1],
+    )
+
+    batch = await anext(adaptive_batcher._batch_requests())
+
+    assert batch.inference_requests == {internal_id: request}
+    assert observed_timeouts == pytest.approx([0.0])
+
+
 async def test_batcher_cancels_responses(
     adaptive_batcher: AdaptiveBatcher,
     mocker,
