@@ -235,17 +235,43 @@ async def test_parallel_registry_batches_per_model_and_maps_responses(
             if batcher is not None
         ]
 
-        requests = []
-        for model in models:
-            requests.append(
-                [
-                    inference_request.copy(
-                        deep=True,
-                        update={"id": f"{model.name}-{index}"},
-                    )
-                    for index in range(2)
-                ]
-            )
+        # Use different values and minibatch sizes so that incorrect merging,
+        # response slicing, or request-to-response association is observable.
+        request_data_by_model = (
+            (
+                ([[1, 2, 3]], [6]),
+                ([[10, 11, 12], [20, 21, 22]], [33, 63]),
+            ),
+            (
+                ([[100, 101, 102]], [303]),
+                ([[1000, 1001, 1002], [2000, 2001, 2002]], [3003, 6003]),
+            ),
+        )
+        requests = [
+            [
+                inference_request.copy(
+                    deep=True,
+                    update={
+                        "id": f"{model.name}-{index}",
+                        "inputs": [
+                            inference_request.inputs[0].copy(
+                                update={
+                                    "shape": [len(values), 3],
+                                    "data": values,
+                                }
+                            )
+                        ],
+                    },
+                )
+                for index, (values, _) in enumerate(model_request_data)
+            ]
+            for model, model_request_data in zip(models, request_data_by_model)
+        ]
+        expected_outputs = [
+            expected
+            for model_request_data in request_data_by_model
+            for _, expected in model_request_data
+        ]
 
         responses = await asyncio.gather(
             *[
@@ -263,10 +289,13 @@ async def test_parallel_registry_batches_per_model_and_maps_responses(
             for model_requests, model in zip(requests, models)
             for _ in model_requests
         ]
+        assert [list(response.outputs[0].data) for response in responses] == [
+            expected for expected in expected_outputs
+        ]
         for dispatch_spy in dispatch_spies:
             dispatch_spy.assert_awaited_once()
             merged_request = dispatch_spy.await_args.args[0]
-            assert merged_request.inputs[0].shape[0] == 2
+            assert merged_request.inputs[0].shape == [3, 3]
     finally:
         for model in models:
             await mlserver._model_registry.unload(model.name)

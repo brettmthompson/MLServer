@@ -5,7 +5,7 @@ from mlserver.batching import adaptive as adaptive_module
 from mlserver.batching.adaptive import AdaptiveBatcher
 from mlserver.batching.requests import BatchedRequests
 from mlserver.batching.shape import Shape
-from mlserver.types import InferenceRequest, RequestInput
+from mlserver.types import InferenceRequest, InferenceResponse, RequestInput
 from mlserver.model import MLModel
 from mlserver.utils import generate_uuid
 
@@ -101,6 +101,57 @@ async def test_batcher_propagates_errors(
         assert str(err.value) == message
 
 
+async def test_batcher_cancels_pending_responses(
+    adaptive_batcher: AdaptiveBatcher,
+    send_request: RequestSender,
+):
+    requests = [await send_request() for _ in range(2)]
+    unrelated_id, _ = await send_request()
+    batched = BatchedRequests(dict(requests))
+
+    prediction = asyncio.create_task(asyncio.sleep(60))
+    prediction.cancel()
+    await asyncio.gather(prediction, return_exceptions=True)
+
+    adaptive_batcher._predict_callback(batched, prediction)
+
+    for internal_id, _ in requests:
+        future = adaptive_batcher._async_responses[internal_id]
+        assert future.cancelled()
+        with pytest.raises(asyncio.CancelledError):
+            await future
+
+    assert not adaptive_batcher._async_responses[unrelated_id].done()
+
+
+async def test_batcher_ignores_missing_or_completed_response_on_cancellation(
+    adaptive_batcher: AdaptiveBatcher,
+    send_request: RequestSender,
+):
+    completed_id, completed_request = await send_request()
+    missing_id, missing_request = await send_request()
+    batched = BatchedRequests(
+        {completed_id: completed_request, missing_id: missing_request}
+    )
+
+    completed_response = InferenceResponse(
+        model_name=adaptive_batcher._model.name,
+        outputs=[],
+    )
+    completed_future = adaptive_batcher._async_responses[completed_id]
+    completed_future.set_result(completed_response)
+    adaptive_batcher._async_responses.pop(missing_id)
+
+    prediction = asyncio.create_task(asyncio.sleep(60))
+    prediction.cancel()
+    await asyncio.gather(prediction, return_exceptions=True)
+
+    adaptive_batcher._predict_callback(batched, prediction)
+
+    assert completed_future.result() is completed_response
+    assert missing_id not in adaptive_batcher._async_responses
+
+
 async def test_batcher_ignores_cancelled_response(
     adaptive_batcher: AdaptiveBatcher,
     send_request: RequestSender,
@@ -163,7 +214,7 @@ async def test_batch_requests_timeout_includes_cancelled_requests(
     # on event-loop scheduling or wall-clock timing.
     mocker.patch.object(adaptive_batcher, "_get_request", side_effect=get_request)
     mocker.patch.object(
-        adaptive_module.time,
+        adaptive_module,
         "monotonic",
         side_effect=[0.0, 0.0, 0.08, 0.08, 0.08, 0.1],
     )
@@ -192,7 +243,7 @@ async def test_batch_requests_drains_available_request_at_deadline(
 
     mocker.patch.object(adaptive_batcher, "_get_request", side_effect=get_request)
     mocker.patch.object(
-        adaptive_module.time,
+        adaptive_module,
         "monotonic",
         side_effect=[0.0, 0.1, 0.1],
     )

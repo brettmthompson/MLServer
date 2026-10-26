@@ -1,6 +1,6 @@
 import asyncio
-import time
 from contextvars import ContextVar
+from time import monotonic
 
 from asyncio import Future, Queue, wait_for, Task
 from functools import partial, wraps
@@ -175,6 +175,11 @@ class AdaptiveBatcher:
                 future = self._async_responses.get(internal_id)
                 if future is not None and not future.done():
                     future.set_result(response)
+        except asyncio.CancelledError:
+            for internal_id in batched.inference_requests.keys():
+                future = self._async_responses.get(internal_id)
+                if future is not None and not future.done():
+                    future.cancel()
         except Exception as err:
             for internal_id in batched.inference_requests.keys():
                 future = self._async_responses.get(internal_id)
@@ -184,11 +189,11 @@ class AdaptiveBatcher:
     async def _batch_requests(self) -> AsyncIterator[BatchedRequests]:
         while not self._requests.empty():
             to_batch: dict[str, InferenceRequest] = {}
-            deadline = time.monotonic() + self._max_batch_time
+            deadline = monotonic() + self._max_batch_time
 
             try:
                 while len(to_batch) < self._max_batch_size:
-                    timeout = deadline - time.monotonic()
+                    timeout = deadline - monotonic()
                     if timeout <= 0 and (to_batch or self._requests.empty()):
                         break
 
