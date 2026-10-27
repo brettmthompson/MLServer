@@ -38,12 +38,11 @@ class MLServer:
             if self._metrics_server:
                 on_worker_stop = [self._metrics_server.on_worker_stop]
 
-            # When using parallel workers, batching should be done on workers
+            # When using parallel workers, batching is applied to the main
+            # process' ParallelModel before dispatch.
             self._inference_pool_registry = InferencePoolRegistry(
                 self._settings,
                 on_worker_stop=on_worker_stop,
-                on_worker_load=[load_batching],
-                on_worker_unload=[unload_batching],
             )
 
         self._model_registry = self._create_model_registry()
@@ -78,13 +77,15 @@ class MLServer:
                 model_operation_timeout=self._settings.model_operation_timeout,
             )
 
-        # In the main process, batching hooks will be a no-op
-        # for models with parallel workers enabled
+        # Batch the main-process ParallelModel before dispatching merged
+        # requests to the inference workers.
         on_model_load = [
             self._inference_pool_registry.load_model,
             self.add_custom_handlers,
+            load_batching,
         ]
         on_model_unload = [
+            unload_batching,
             self.remove_custom_handlers,
             self._inference_pool_registry.unload_model,
         ]
