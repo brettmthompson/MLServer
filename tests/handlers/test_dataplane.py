@@ -24,15 +24,22 @@ async def test_ready(data_plane, model_registry, ready):
     assert all_ready == ready
 
 
-async def test_ready_returns_false_when_startup_not_complete(data_plane_during_startup):
+@pytest.mark.parametrize("strict_readiness", [True, False])
+async def test_ready_returns_false_when_startup_not_complete(
+    data_plane_during_startup, strict_readiness
+):
     """
     Health check returns False when startup hasn't completed.
-    This is true even in lenient mode - strict_readiness is ignored during startup.
+    This is true in both strict and lenient mode - strict_readiness is ignored
+    during startup. Once startup_complete() is called, the readiness settings apply.
     """
-    # Set lenient mode to prove it's ignored during startup
-    data_plane_during_startup._settings.strict_readiness = False
+    data_plane_during_startup._settings.strict_readiness = strict_readiness
 
     assert not await data_plane_during_startup.ready()
+
+    data_plane_during_startup.startup_complete()
+
+    assert await data_plane_during_startup.ready()
 
 
 async def test_ready_with_failed_dynamic_model(

@@ -125,7 +125,7 @@ class MLServer:
             ]
             await asyncio.gather(*tasks)
             # Mark startup complete only if all models loaded successfully
-            self._model_registry.startup_complete()
+            self._data_plane.startup_complete()
 
             if not models_settings and not self._settings.empty_registry_readiness:
                 logger.warning(

@@ -27,11 +27,15 @@ class DataPlane:
     """
     Internal implementation of handlers, used by both the gRPC and REST
     servers.
+
+    It also tracks startup completion. Until `startup_complete()` is called,
+    the readiness check reports not ready.
     """
 
     def __init__(self, settings: Settings, model_registry: MultiModelRegistry):
         self._settings = settings
         self._model_registry = model_registry
+        self._startup_complete = False
         self._inference_middleware = InferenceMiddlewares(
             CloudEventsMiddleware(settings)
         )
@@ -53,6 +57,28 @@ class DataPlane:
             ["model", "version"],
         )
 
+    @property
+    def is_startup_complete(self) -> bool:
+        """
+        Whether the initial server startup has completed.
+
+        The readiness check reports not ready until startup is marked complete,
+        regardless of the readiness settings. This prevents traffic from being
+        routed to the server before the initial startup phase actions have
+        completed.
+        """
+        return self._startup_complete
+
+    def startup_complete(self) -> None:
+        """
+        Mark that the initial server startup has completed.
+
+        This should only be called by the server's main startup process after all
+        initial models have been loaded. From then on, the readiness check
+        follows `strict_readiness` and `empty_registry_readiness`.
+        """
+        self._startup_complete = True
+
     async def live(self) -> bool:
         return True
 
@@ -66,7 +92,7 @@ class DataPlane:
         taken into account.
         """
         # Return false if startup has not completed
-        if not self._model_registry.is_startup_complete:
+        if not self._startup_complete:
             return False
 
         # Fetch models from the registry

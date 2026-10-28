@@ -278,7 +278,7 @@ async def test_server_marks_startup_complete_after_successful_load(
         await rest_client.wait_until_model_ready(sum_model_settings.name)
 
         # Should be marked complete after successful load
-        assert server._model_registry.is_startup_complete
+        assert server._data_plane.is_startup_complete
 
         # Verify server task is still running
         assert not server_task.done(), "Server task completed unexpectedly"
@@ -314,7 +314,8 @@ async def test_server_keeps_startup_incomplete_after_load_failure(
         pytest.fail("Server task was cancelled unexpectedly")
     except Exception:
         # Exceptions during shutdown are acceptable (e.g., cleanup errors)
-        # We only care that startup completed and registry state is correct
+        # We only care that startup completed and the registry and data plane
+        # state is correct
         pass
 
     # Verify task actually completed (not hanging)
@@ -325,7 +326,7 @@ async def test_server_keeps_startup_incomplete_after_load_failure(
         await server._model_registry.get_model(load_error_model_settings.name)
 
     # Should still be False (startup failed)
-    assert not server._model_registry.is_startup_complete
+    assert not server._data_plane.is_startup_complete
 
 
 async def test_server_startup_with_no_models(
@@ -336,7 +337,7 @@ async def test_server_startup_with_no_models(
     """
     Test that server completes startup even with no models configured.
     This tests the edge case where an empty model list should still
-    complete startup successfully and set _startup_complete to True.
+    complete startup successfully and mark startup as complete.
     """
     from mlserver import MLServer
 
@@ -348,7 +349,7 @@ async def test_server_startup_with_no_models(
         await rest_client.wait_until_live()
 
         # Startup should complete even with no models
-        assert server._model_registry.is_startup_complete
+        assert server._data_plane.is_startup_complete
 
         # Health check should use empty_registry_readiness setting
         is_ready = await rest_client.ready()
