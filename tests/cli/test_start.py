@@ -262,8 +262,9 @@ async def test_server_marks_startup_complete_after_successful_load(
 ):
     """
     Test that server.start() has completed startup loading
-    after successful load at startup. This ensures health check can
-    use lenient mode (strict_readiness=False) after startup.
+    after successful load at startup. This ensures the health check stops
+    reporting not ready because of the inital startup loading sequence
+    once it completes.
     """
     from mlserver import MLServer
 

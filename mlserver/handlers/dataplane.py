@@ -57,6 +57,14 @@ class DataPlane:
         return True
 
     async def ready(self) -> bool:
+        """
+        Server readiness.
+
+        Never ready before startup completes. After that,
+        `empty_registry_readiness` decides what an empty registry means, and
+        `strict_readiness` decides whether the state of the loaded models is
+        taken into account.
+        """
         # Return false if startup has not completed
         if not self._model_registry.is_startup_complete:
             return False
@@ -70,11 +78,13 @@ class DataPlane:
 
         # Apply strict or lenient readiness mode based on setting
         if self._settings.strict_readiness:
-            # Strict mode: ALL models must be ready
+            # Strict mode (V2 protocol compliant): ALL models must be ready
             return all(model.ready for model in models)
         else:
-            # Lenient mode: AT LEAST ONE model must be ready
-            return any(model.ready for model in models)
+            # Lenient mode: model state is ignored so that a model that is still
+            # loading doesn't block traffic to any other loaded models or new
+            # model lifecycle requests.
+            return True
 
     async def model_ready(self, name: str, version: str | None = None) -> bool:
         model = await self._model_registry.get_model(name, version)
