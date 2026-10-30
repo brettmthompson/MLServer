@@ -423,10 +423,15 @@ class Settings(BaseSettings):
 
     Set this to False when models are loaded dynamically after startup.
     A new model or model version is not ready while it loads, so with True the
-    server is not ready during the load. With False it stays ready, to maintain
-    server availability for already loaded models and future model lifecycle
-    operation requests. This deliberately departs from the V2 protocol. Check
-    individual models through the model ready endpoint.
+    server is not ready during the load. With False it stays ready, so the
+    traffic to the server is not blocked, including requests to
+    already loaded models and future model lifecycle operations. This
+    deliberately departs from the V2 protocol. Check individual models through
+    the model ready endpoint.
+
+    Readiness only gates routing to the server. It does not change which version
+    a request without a version resolves to: that is always the default (latest)
+    registered version, even while it is still loading.
 
     An empty registry follows `empty_registry_readiness` in both modes.
 

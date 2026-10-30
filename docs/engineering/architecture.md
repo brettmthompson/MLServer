@@ -781,7 +781,7 @@ variables, `.env` files, and JSON configuration files.
 | `parallel_workers` | 1 | Number of multiprocessing workers (1 = disabled) |
 | `max_batch_size` | 0 | Adaptive batching batch size (0 = disabled) |
 | `max_batch_time` | 0.0 | Adaptive batching time window in seconds |
-| `strict_readiness` | true | All models in the registry must be ready; if false, always ready after startup |
+| `strict_readiness` | true | If true, all models in the registry must be ready. If false, model readiness is ignored after startup; an empty registry follows `empty_registry_readiness` |
 | `empty_registry_readiness` | true | Report ready when no models are in the registry (both readiness modes) |
 
 ---

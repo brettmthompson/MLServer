@@ -185,8 +185,8 @@ The readiness check answers one question: should traffic be routed to this serve
 | Startup has not completed | not ready |
 | No models in the registry, `empty_registry_readiness: true` (default) | ready |
 | No models in the registry, `empty_registry_readiness: false` | not ready |
-| Models in the registry, `strict_readiness: true` (default) | ready only if ALL models are ready |
-| Models in the registry, `strict_readiness: false` | always ready |
+| Models in the registry, `strict_readiness: true` (default) | ready only if all models in the registry are ready |
+| Models in the registry, `strict_readiness: false` | ready; model readiness is ignored |
 
 Both settings can be set with the `MLSERVER_STRICT_READINESS` and `MLSERVER_EMPTY_REGISTRY_READINESS` environment variables, or in `settings.json`.
 
@@ -196,7 +196,7 @@ Both settings can be set with the `MLSERVER_STRICT_READINESS` and `MLSERVER_EMPT
 
 #### Lenient mode
 
-`strict_readiness: false` ignores model state, so the server stays ready while a new model or model version is loading. Loading models dynamically therefore does not block traffic to the models that are already loaded, or further requests to load and unload models. This deliberately departs from the protocol and suits deployments that load models dynamically after startup. In either mode, check individual models with `GET /v2/models/{name}/ready`. In lenient mode it is the only readiness signal for models.
+`strict_readiness: false` model readiness is ignored after startup; an empty registry follows `empty_registry_readiness`. So the server stays ready while a new model or model version is loading. Loading models dynamically therefore does not block traffic to the models that are already loaded, or further requests to load and unload models. This deliberately departs from the protocol and suits deployments that load models dynamically after startup. In either mode, check individual models with `GET /v2/models/{name}/ready`. In lenient mode it is the only readiness signal for models.
 
 #### Empty registry
 

@@ -63,7 +63,7 @@ Models loaded at startup need no extra readiness configuration: the server is re
 ### How do I serve multiple versions of the same model?
 
 Set the `parameters.version` field in each model's `model-settings.json`.
-When a version is not specified in inference requests, MLServer routes to the latest version (determined by lexicographic or numeric comparison).
+When a version is not specified in inference requests, MLServer routes to the default (latest) version (determined by lexicographic or numeric comparison). This includes a new default version that is still loading, so requests without a version fail with `ModelNotReady` until it is ready. To keep using an older version in the meantime, request it explicitly.
 
 ### Can I load and unload models at runtime?
 
