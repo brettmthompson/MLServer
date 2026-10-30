@@ -218,7 +218,7 @@ MLServer-specific `include_registry_models` extension:
 **Request:**
 ```json
 {
-  "ready": true
+  "ready": false
 }
 ```
 
