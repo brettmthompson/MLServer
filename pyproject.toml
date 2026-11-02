@@ -65,6 +65,8 @@ urllib3 = ">=2.8.0"
 # anyio is only a transitive dependency (via starlette); keep a min version
 # to pick up the fix for TLS certificate spoofing via IDNA encoding
 anyio = ">=4.14.2"
+# certifi is only a transitive dependency (via geventhttpclient); keep a min version
+certifi = ">=2026.10.19"
 gevent = "*"
 aiofiles = "*"
 orjson = "*"
