@@ -273,6 +273,28 @@ The CUDA Docker images set the environment variable
 `MLSERVER_MODEL_ONNX_PROVIDERS='["CUDAExecutionProvider","CPUExecutionProvider"]'`
 by default, so no model-settings change is needed when using the pre-built image.
 
+### Execution profiles
+
+For CPU-only serving, select `["CPUExecutionProvider"]`. For GPU-required
+serving, configure these fields under `parameters.extra`:
+
+```json
+{
+  "providers": ["CUDAExecutionProvider"],
+  "provider_options": {"device_id": 0},
+  "session_config_entries": {"session.disable_cpu_ep_fallback": "1"}
+}
+```
+
+The ordinal refers to the devices visible inside each worker. A pod allocated
+one GPU ordinarily sees it as device zero. With CPU fallback permitted, a
+well-formed but unavailable ordinal can result in a CPU session. Malformed
+CUDA ordinals and conflicting device or CUDA graph selections in repeated
+CUDA entries fail loading. ONNX Runtime uses the first entry for a provider.
+
+For a mixed profile, list CUDA and CPU in priority order, identify the operators
+allowed on CPU, and check the operator trace alongside the expected outputs.
+
 ### Execution provider fields
 
 - `providers`: ordered list of execution providers; the runtime attempts them in the order they appear in the list.
@@ -386,6 +408,19 @@ Poetry. It requires an NVIDIA driver compatible with CUDA 12. The launcher sets
 the native library search path before starting pytest. Real-device tests cover
 graph capture/replay, changed request contents, independent response buffers,
 and blocking synchronization, both separately and together.
+
+The worker profile test checks known outputs, operator placement, and effective
+thread counts in two workers and after one worker restarts. To exercise a
+different visible ordinal in that test and the CUDA graph/blocking-wait policy
+tests, pass it through tox, for example on a two-device allocation:
+
+```sh
+poetry run -- tox -c runtimes/onnx -e cuda-ci -- --cuda-device-id=1
+```
+
+Record the pod's allocation and GPU identities with each qualification run.
+Run once on the allocation alone and again with the stated competing workload
+when qualifying sharing.
 
 `cuda-ci` uses `--require-cuda`: missing CUDA coverage or skipped CUDA tests fail
 the run. The existing `cuda` environment retains automatic skips for CPU-only
