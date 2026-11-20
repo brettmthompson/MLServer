@@ -145,6 +145,30 @@ class OnnxModel(MLModel):
                         "cuda_graph requires provider enable_cuda_graph=1"
                     )
                 cuda_options["enable_cuda_graph"] = "1"
+        later_graph = {
+            str(entry["enable_cuda_graph"])
+            for entry in cuda_entries[1:]
+            if "enable_cuda_graph" in entry
+        }
+        allowed_graph = set()
+        if later_graph:
+            # Only reject definite contradictions before changing shared CUDA flags.
+            # ORT resolves the first provider's effective setting at session creation.
+            enabled = {"1", "True", "true"}
+            disabled = {"0", "False", "false"}
+            first_graph = (
+                "1"
+                if self._onnx_settings.cuda_graph
+                else str(first_cuda.get("enable_cuda_graph"))
+            )
+            if later_graph <= enabled and first_graph not in disabled:
+                allowed_graph = enabled
+            elif later_graph <= disabled and first_graph not in enabled:
+                allowed_graph = disabled
+            else:
+                raise ModelLoadError(
+                    "Invalid or conflicting CUDA enable_cuda_graph selections"
+                )
         if self._onnx_settings.cuda_graph:
             # An empty RunOptions mapping requests defaults. The graph session
             # uses its fixed binding path and accepts only the default None.
@@ -176,22 +200,13 @@ class OnnxModel(MLModel):
                 providers=providers,
                 provider_options=provider_options,
             )
-            later_graph = {
-                str(entry["enable_cuda_graph"])
-                for entry in cuda_entries[1:]
-                if "enable_cuda_graph" in entry
-            }
-            if later_graph:
+            if allowed_graph:
                 active = session.get_provider_options().get("CUDAExecutionProvider", {})
                 graph = active.get(
-                    "enable_cuda_graph", first_cuda.get("enable_cuda_graph")
+                    "enable_cuda_graph",
+                    first_cuda.get("enable_cuda_graph", self._onnx_settings.cuda_graph),
                 )
-                if graph is not None:
-                    later_graph.add(str(graph))
-                if not (
-                    later_graph <= {"0", "False", "false"}
-                    or later_graph <= {"1", "True", "true"}
-                ):
+                if graph is not None and str(graph) not in allowed_graph:
                     raise ModelLoadError(
                         "Invalid or conflicting CUDA enable_cuda_graph selections"
                     )

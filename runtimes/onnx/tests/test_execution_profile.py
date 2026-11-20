@@ -130,6 +130,7 @@ async def test_worker_profile_after_restart(
         ([{"device_id": " 0 "}], "device_id"),
         ([{}, {"device_id": "cuda:0"}], "device_id"),
         ([{}, {"device_id": 1}], "device_id"),
+        ([{}, {"enable_cuda_graph": "1"}], "enable_cuda_graph"),
         ([{"enable_cuda_graph": "0"}, {"enable_cuda_graph": "1"}], "enable_cuda_graph"),
     ],
 )
@@ -148,13 +149,23 @@ async def test_invalid_selection_is_not_published(
     assert await registry.get_models() == []
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"providers": ["CUDAExecutionProvider"]},
+        {
+            "providers": ["CUDAExecutionProvider"] * 2,
+            "provider_options": [{}, {"enable_cuda_graph": "0"}],
+        },
+    ],
+)
 async def test_cpu_host_fallback_policy(
-    model_settings: ModelSettings, inference_request: InferenceRequest
+    model_settings: ModelSettings, inference_request: InferenceRequest, extra: dict
 ) -> None:
     if "CUDAExecutionProvider" in ort.get_available_providers():
         pytest.skip("Requires an installation without the CUDA provider")
     assert model_settings.parameters is not None
-    model_settings.parameters.extra = {"providers": ["CUDAExecutionProvider"]}
+    model_settings.parameters.extra = extra
     registry = MultiModelRegistry()
     model = await registry.load(model_settings)
     try:

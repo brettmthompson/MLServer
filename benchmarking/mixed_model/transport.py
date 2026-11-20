@@ -22,7 +22,13 @@ class GrpcCalls:
     def __init__(self, client: GRPCInferenceServiceStub, models: Sequence["Target"]):
         self.client = client
         self.templates = [
-            ModelInferRequestConverter.from_types(m.request, m.name, m.version)
+            ModelInferRequestConverter.from_types(
+                m.request,
+                m.name,
+                m.version,
+                # The V2 raw encoder converts JSON strings to length-prefixed UTF-8.
+                use_raw=any(inp.datatype == "BYTES" for inp in m.request.inputs),
+            )
             for m in models
         ]
 

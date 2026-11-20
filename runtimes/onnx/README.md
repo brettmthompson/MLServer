@@ -291,6 +291,9 @@ one GPU ordinarily sees it as device zero. With CPU fallback permitted, a
 well-formed but unavailable ordinal can result in a CPU session. Malformed
 CUDA ordinals and conflicting device or CUDA graph selections in repeated
 CUDA entries fail loading. ONNX Runtime uses the first entry for a provider.
+MLServer rejects explicit graph-setting conflicts before configuring blocking
+synchronization. If the first CUDA entry relies on a default, MLServer checks
+a later explicit graph request against the effective setting during loading.
 
 For a mixed profile, list CUDA and CPU in priority order, identify the operators
 allowed on CPU, and check the operator trace alongside the expected outputs.
@@ -400,7 +403,7 @@ and transport settings are described in
 From the repository root, run the GPU validation suite serially:
 
 ```bash
-poetry run tox -c runtimes/onnx -e cuda-ci
+poetry run -- tox -c runtimes/onnx -e cuda-ci
 ```
 
 This environment installs the locked GPU dependencies and NVIDIA libraries with
@@ -419,6 +422,9 @@ poetry run -- tox -c runtimes/onnx -e cuda-ci -- --cuda-device-id=1
 ```
 
 Record the pod's allocation and GPU identities with each qualification run.
+For a nonzero ordinal, also collect device-level evidence linking the worker's
+inference to the selected GPU. An operator trace identifies the execution
+provider but does not distinguish two GPUs using that provider.
 Run once on the allocation alone and again with the stated competing workload
 when qualifying sharing.
 

@@ -3,12 +3,15 @@
 import argparse
 import asyncio
 import json
+import logging
 import math
 import random
 import shutil
 import sqlite3
+import struct
 import uuid
 from collections.abc import Callable
+from itertools import count
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
@@ -25,13 +28,17 @@ from pydantic import (
 )
 
 from mlserver import types
+from mlserver.codecs.string import encode_str
+from mlserver.errors import InferenceError
 from mlserver.grpc import dataplane_pb2 as pb
+from mlserver.grpc.converters import _FIELDS as _GRPC_CONTENT_FIELDS
 from mlserver.grpc.converters import ModelInferResponseConverter
 from mlserver.grpc.dataplane_pb2_grpc import GRPCInferenceServiceStub
 
 from .report import summary
 from .transport import GrpcCalls, RestCalls, failure
 
+logger = logging.getLogger(__name__)
 Nonnegative = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 
@@ -95,14 +102,31 @@ class Scenario(Config):
         return self
 
 
+class _IncorrectValues(ValueError):
+    """A well-formed reply matched the request, model and tensor metadata."""
+
+
 def check_output(
     reply: pb.ModelInferResponse | bytes, target: Target, request_id: str
 ) -> None:
-    response = (
-        types.InferenceResponse.model_validate_json(reply)
-        if isinstance(reply, bytes)
-        else ModelInferResponseConverter.to_types(reply)
-    )
+    if isinstance(reply, bytes):
+        response = types.InferenceResponse.model_validate_json(reply)
+    else:
+        if reply.raw_output_contents and (
+            len(reply.raw_output_contents) != len(reply.outputs)
+            or any(output.HasField("contents") for output in reply.outputs)
+        ):
+            raise ValueError(
+                "raw gRPC replies require one buffer per output and no typed contents"
+            )
+        for tensor in reply.outputs:
+            field = _GRPC_CONTENT_FIELDS.get(types.Datatype(tensor.datatype))
+            if any(desc.name != field for desc, _ in tensor.contents.ListFields()):
+                raise ValueError(f"{tensor.name}: contents disagree with datatype")
+        try:
+            response = ModelInferResponseConverter.to_types(reply)
+        except (struct.error, IndexError, OverflowError, InferenceError) as exc:
+            raise ValueError(f"invalid gRPC output: {exc}") from exc
     if (response.id, response.model_name, response.model_version) != (
         request_id,
         target.name,
@@ -114,20 +138,39 @@ def check_output(
         o.name for o in target.expected
     }:
         raise ValueError("response output names mismatch")
+    wrong_values = []
     for expected in target.expected:
         actual = outputs[expected.name]
         if (actual.datatype, actual.shape) != (expected.datatype, expected.shape):
             raise ValueError(f"{expected.name}: datatype or shape mismatch")
-        observed = np.asarray(actual.data.root)
-        wanted = np.asarray(expected.data.root)
+        floating = expected.datatype in ("FP16", "FP32", "FP64")
+        values = expected.data.root
+        if isinstance(reply, bytes):
+            if floating:
+                allowed: tuple[type, ...] = (int, float)
+            elif expected.datatype == "BOOL":
+                allowed = (bool,)
+            elif expected.datatype == "BYTES":
+                allowed = (str,)
+            else:
+                allowed = (int,)
+            if any(type(value) not in allowed for value in actual.data.root):
+                raise ValueError(f"{expected.name}: contents disagree with datatype")
+        elif expected.datatype == "BYTES":
+            values = [encode_str(v) if isinstance(v, str) else v for v in values]
+        # Type inference can round valid UINT64 integers to float64.
+        observed = np.asarray(actual.data.root, dtype=None if floating else object)
+        wanted = np.asarray(values, dtype=None if floating else object)
         if observed.shape != wanted.shape or observed.size != math.prod(expected.shape):
             raise ValueError(f"{expected.name}: data length mismatch")
-        if expected.datatype in ("FP16", "FP32", "FP64"):
+        if floating:
             equal = np.allclose(observed, wanted, rtol=target.rtol, atol=target.atol)
         else:
             equal = np.array_equal(observed, wanted)
         if not equal:
-            raise ValueError(f"{expected.name}: incorrect values")
+            wrong_values.append(expected.name)
+    if wrong_values:
+        raise _IncorrectValues(f"{', '.join(wrong_values)}: incorrect values")
 
 
 def database(path: Path) -> sqlite3.Connection:
@@ -137,8 +180,10 @@ def database(path: Path) -> sqlite3.Connection:
     db.executescript(
         """
         CREATE TABLE run(id TEXT, address TEXT, scenario TEXT);
+        CREATE TABLE completed_run(id TEXT PRIMARY KEY);
         CREATE TABLE attempt(id TEXT PRIMARY KEY, phase TEXT, model TEXT, version TEXT,
-            due REAL, submitted REAL, finished REAL, outcome TEXT, detail TEXT);
+            due REAL, submitted REAL, finished REAL, outcome TEXT, detail TEXT,
+            verified_reply INTEGER NOT NULL);
         CREATE TABLE lifecycle(phase TEXT, model TEXT, operation TEXT, due REAL,
             submitted REAL, finished REAL, status TEXT, expected TEXT);
         CREATE TABLE resource(at REAL, source TEXT, subject TEXT, bytes INTEGER);
@@ -147,10 +192,7 @@ def database(path: Path) -> sqlite3.Connection:
     return db
 
 
-async def resources(
-    db: sqlite3.Connection, now: Callable[[], float], stop: asyncio.Event
-) -> None:
-    """Sample the co-located Linux cgroup and visible GPUs off the inference path."""
+def _cgroup_memory_path() -> Path | None:
     cgroup = Path("/sys/fs/cgroup")
     membership = Path("/proc/self/cgroup")
     paths = []
@@ -163,7 +205,7 @@ async def resources(
                     paths.append(cgroup / relative / "memory.current")
                 elif "memory" in controllers.split(","):
                     paths.append(cgroup / "memory" / relative / "memory.usage_in_bytes")
-    memory = next(
+    return next(
         (
             p
             for p in [
@@ -175,35 +217,61 @@ async def resources(
         ),
         None,
     )
+
+
+async def _sample_gpu_memory(
+    smi: str, db: sqlite3.Connection, now: Callable[[], float]
+) -> None:
+    process = await asyncio.create_subprocess_exec(
+        smi,
+        "--query-gpu=uuid,memory.used",
+        "--format=csv,noheader,nounits",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    if process.returncode:
+        raise RuntimeError(f"nvidia-smi exited {process.returncode}: {stderr.decode()}")
+    for line in stdout.decode().splitlines():
+        try:
+            gpu, mib = line.split(",")
+            used = int(mib) * 1024**2
+        except ValueError:
+            logger.warning("Skipping unavailable GPU memory reading: %r", line)
+            continue
+        db.execute(
+            "INSERT INTO resource VALUES(?,?,?,?)",
+            (now(), "gpu_used", gpu.strip(), used),
+        )
+
+
+async def resources(
+    db: sqlite3.Connection, now: Callable[[], float], stop: asyncio.Event
+) -> None:
+    """Sample the co-located Linux cgroup and visible GPUs off the inference path."""
+    memory = None
     smi = shutil.which("nvidia-smi")
     while True:
-        if memory:
-            db.execute(
-                "INSERT INTO resource VALUES(?,?,?,?)",
-                (now(), "cgroup_memory", str(memory), int(memory.read_text())),
-            )
-        if smi:
-            process = await asyncio.create_subprocess_exec(
-                smi,
-                "--query-gpu=uuid,memory.used",
-                "--format=csv,noheader,nounits",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
-            finally:
-                if process.returncode is None:
-                    process.kill()
-                    await process.wait()
-            if process.returncode:
-                raise RuntimeError(f"nvidia-smi failed: {stderr.decode()}")
-            for line in stdout.decode().splitlines():
-                gpu, mib = line.split(",")
+        try:
+            if memory is None:
+                memory = _cgroup_memory_path()
+            if memory is not None:
                 db.execute(
                     "INSERT INTO resource VALUES(?,?,?,?)",
-                    (now(), "gpu_used", gpu.strip(), int(mib) * 1024**2),
+                    (now(), "cgroup_memory", str(memory), int(memory.read_text())),
                 )
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping cgroup memory sample: %s", exc)
+        if smi:
+            try:
+                await _sample_gpu_memory(smi, db, now)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.warning("Skipping GPU memory sample: %r", exc)
         if stop.is_set():
             return
         try:
@@ -230,8 +298,10 @@ async def run(
         update={"deployment": {**scenario.deployment, "protocol": calls.protocol}}
     )
     db.execute(
-        "INSERT INTO run VALUES(?,?,?)", (run_id, address, recorded.model_dump_json())
+        "INSERT INTO run(id,address,scenario) VALUES(?,?,?)",
+        (run_id, address, recorded.model_dump_json()),
     )
+    db.commit()
 
     async def manage(action: Action, origin: float, phase: str) -> str:
         await asyncio.sleep(max(0, origin + action.at_s - clock()))
@@ -266,6 +336,7 @@ async def run(
             target = scenario.models[index]
             submitted = clock() - origin
             detail = ""
+            verified_reply = False
             try:
                 reply = await calls.infer(index, request_id, scenario.deadline_s)
             except (grpc.aio.AioRpcError, aiohttp.ClientError, TimeoutError) as exc:
@@ -276,10 +347,12 @@ async def run(
                 try:
                     check_output(reply, target, request_id)
                     outcome = "correct"
+                    verified_reply = True
                 except (TypeError, ValueError) as exc:
                     outcome, detail = "wrong_output", str(exc)
+                    verified_reply = isinstance(exc, _IncorrectValues)
             db.execute(
-                "INSERT INTO attempt VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO attempt VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     request_id,
                     phase,
@@ -290,12 +363,15 @@ async def run(
                     finished,
                     outcome,
                     detail,
+                    verified_reply,
                 ),
             )
 
         async with asyncio.TaskGroup() as tasks:
-            for seq in range(math.ceil(duration * scenario.rate)):
+            for seq in count():
                 due = seq / scenario.rate
+                if due >= duration:
+                    break
                 await asyncio.sleep(max(0, origin + due - clock()))
                 choices = [
                     i
@@ -310,7 +386,7 @@ async def run(
                 late = clock() - origin - due >= 1 / scenario.rate
                 if late or len(active) >= scenario.concurrency:
                     db.execute(
-                        "INSERT INTO attempt VALUES(?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO attempt VALUES(?,?,?,?,?,?,?,?,?,0)",
                         (
                             rid,
                             phase,
@@ -327,36 +403,43 @@ async def run(
                 task = tasks.create_task(infer(index, rid, due))
                 active.add(task)
                 task.add_done_callback(active.discard)
+            # Event-loop timers can wake just before the monotonic deadline.
+            end = origin + duration
+            while (remaining := end - clock()) > 0:
+                await asyncio.sleep(remaining)
 
-    for model in scenario.initial_load:
-        if (
-            await manage(
-                Action(at_s=0, operation="load", model=model), clock(), "setup"
-            )
-            != "OK"
-        ):
-            db.commit()
-            raise RuntimeError(f"initial load failed for {model}")
-    await traffic(scenario.warmup_s, "warmup", clock())
-    origin = clock()
-    stop = asyncio.Event()
-    async with asyncio.TaskGroup() as tasks:
-        if local_resources:
-            tasks.create_task(resources(db, lambda: clock() - origin, stop))
-        try:
-            async with asyncio.TaskGroup() as measured:
-                measured.create_task(traffic(scenario.duration_s, "measure", origin))
+    async def changes(origin: float) -> None:
+        for action in sorted(scenario.actions, key=lambda a: a.at_s):
+            await manage(action, origin, "measure")
 
-                # A scenario's management requests execute in their declared time order.
-                async def changes() -> None:
-                    for action in sorted(scenario.actions, key=lambda a: a.at_s):
-                        await manage(action, origin, "measure")
+    try:
+        for model in scenario.initial_load:
+            if (
+                await manage(
+                    Action(at_s=0, operation="load", model=model), clock(), "setup"
+                )
+                != "OK"
+            ):
+                raise RuntimeError(f"initial load failed for {model}")
+        await traffic(scenario.warmup_s, "warmup", clock())
+        origin = clock()
+        stop = asyncio.Event()
+        async with asyncio.TaskGroup() as tasks:
+            if local_resources:
+                tasks.create_task(resources(db, lambda: clock() - origin, stop))
+            try:
+                async with asyncio.TaskGroup() as measured:
+                    measured.create_task(
+                        traffic(scenario.duration_s, "measure", origin)
+                    )
 
-                measured.create_task(changes())
-                await asyncio.sleep(scenario.duration_s)
-        finally:
-            stop.set()
-    db.commit()
+                    measured.create_task(changes(origin))
+            finally:
+                stop.set()
+        db.execute("INSERT INTO completed_run VALUES(?)", (run_id,))
+    finally:
+        # Keep completed observations when a run is interrupted.
+        db.commit()
 
 
 async def main() -> None:

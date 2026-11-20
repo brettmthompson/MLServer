@@ -8,7 +8,13 @@ from pathlib import Path
 
 
 def summarize_window(
-    db: sqlite3.Connection, model: str, version: str, start: float, end: float
+    db: sqlite3.Connection,
+    model: str,
+    version: str,
+    start: float,
+    end: float,
+    *,
+    report_throughput: bool = True,
 ) -> dict:
     selector = "FROM attempt WHERE phase='measure' AND model=? AND version=? "
     args = (model, version)
@@ -26,7 +32,14 @@ def summarize_window(
         params,
     ).fetchone()[0]
     timings = cohort + "AND finished IS NOT NULL "
-    total = db.execute("SELECT COUNT(*) " + timings, params).fetchone()[0]
+    # Older runs did not distinguish malformed replies from wrong tensor values.
+    columns = {col[1] for col in db.execute("PRAGMA table_info(attempt)")}
+    evidence = (
+        "verified_reply" if "verified_reply" in columns else "(outcome='correct')"
+    )
+    total, accepted = db.execute(
+        f"SELECT COUNT(*),COALESCE(SUM({evidence}),0) " + timings, params
+    ).fetchone()
     latency = {}
     for pct in (50, 95, 99):
         if total:
@@ -39,14 +52,13 @@ def summarize_window(
     return dict(
         offered=arrivals,
         submitted=total,
-        # A V2 inference response proves the call reached serving. A lost or
-        # timed-out response says nothing about whether the worker ran it.
-        accepted_lower_bound_from_replies=counts.get("correct", 0)
-        + counts.get("wrong_output", 0),
+        accepted_lower_bound_from_replies=accepted,
         outcomes=counts,
         client_latency_ms=latency,
         correct_responses_in_window=correct_in_window,
-        correct_responses_per_s=correct_in_window / elapsed if elapsed else None,
+        correct_responses_per_s=(
+            correct_in_window / elapsed if elapsed and report_throughput else None
+        ),
     )
 
 
@@ -59,6 +71,10 @@ def read_worker_log(db: sqlite3.Connection, path: Path, run_id: str) -> list[dic
     )
     with path.open() as stream:
         for line in stream:
+            if "worker_execution " not in line:
+                continue
+            if line.startswith("{"):
+                line = json.loads(line).get("message", "")
             _, marker, payload = line.partition("worker_execution ")
             if marker:
                 event = json.loads(payload)
@@ -90,9 +106,26 @@ def read_worker_log(db: sqlite3.Connection, path: Path, run_id: str) -> list[dic
 
 
 def summary(db: sqlite3.Connection, worker_log: Path | None = None) -> dict:
-    run_id, address, config = db.execute("SELECT * FROM run").fetchone()
+    row = db.execute("SELECT id,address,scenario FROM run").fetchone()
+    if row is None:
+        raise ValueError("No benchmark run was recorded")
+    run_id, address, config = row
     config = json.loads(config)
     duration = config["duration_s"]
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='completed_run'").fetchone():
+        completed = db.execute(
+            "SELECT 1 FROM completed_run WHERE id=?", (run_id,)
+        ).fetchone()
+        run_status = "complete" if completed else "incomplete"
+    else:
+        # Older databases have no completion marker. Missing scheduled arrivals
+        # prove an interruption; a full set cannot prove the run finished.
+        arrivals = db.execute(
+            "SELECT COUNT(*) FROM attempt WHERE phase='measure' AND due<?", (duration,)
+        ).fetchone()[0]
+        run_status = (
+            "incomplete" if arrivals / config["rate"] < duration else "unrecorded"
+        )
     windows = [("all", 0, duration)]
     actions = []
     for name, op, due, start, finish, status, expected in db.execute(
@@ -120,6 +153,7 @@ def summary(db: sqlite3.Connection, worker_log: Path | None = None) -> dict:
                 windows.append((f"{label}:{part}", left, min(right, duration)))
     result = dict(
         run=run_id,
+        status=run_status,
         address=address,
         deployment=config["deployment"],
         actions=actions,
@@ -128,7 +162,14 @@ def summary(db: sqlite3.Connection, worker_log: Path | None = None) -> dict:
                 model=m["name"],
                 version=m["version"],
                 windows={
-                    name: summarize_window(db, m["name"], m["version"], a, b)
+                    name: summarize_window(
+                        db,
+                        m["name"],
+                        m["version"],
+                        a,
+                        b,
+                        report_throughput=run_status != "incomplete",
+                    )
                     for name, a, b in windows
                 },
             )
@@ -171,4 +212,7 @@ if __name__ == "__main__":
     with sqlite3.connect(
         f"{args.database.resolve().as_uri()}?mode=ro", uri=True
     ) as connection:
-        print(json.dumps(summary(connection, args.worker_log), indent=2))
+        result = summary(connection, args.worker_log)
+        print(json.dumps(result, indent=2))
+        if result["status"] == "incomplete":
+            raise SystemExit(1)
