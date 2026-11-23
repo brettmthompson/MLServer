@@ -194,6 +194,11 @@ class Dispatcher:
         self._async_responses = AsyncResponses()
         self._transport: ParentTransport | None = None
 
+    @property
+    def has_ready_workers(self) -> bool:
+        """Read routing eligibility without selecting a worker."""
+        return bool(self._ready_workers)
+
     def _reset_round_robin(self) -> Iterator[int]:
         worker_pids = list(self._ready_workers.keys())
         self._workers_round_robin = cycle(worker_pids)

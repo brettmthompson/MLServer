@@ -108,7 +108,10 @@ class SingleModelRegistry:
         on_model_unload: Sequence[ModelRegistryHook] = [],
         model_initialiser: ModelInitialiser = model_initialiser,
         model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
+        load_failures: set[tuple[str, str]] | None = None,
     ):
+        # Recorded failures survive removal of an empty single-model registry.
+        self._load_failures = load_failures if load_failures is not None else set()
         self._operation_lock = asyncio.Lock()
         self._versions: dict[str, MLModel] = {}
         self._pending_reload: dict[str, MLModel] = {}
@@ -204,18 +207,23 @@ class SingleModelRegistry:
         await self._drain_cleanup()
         version = _get_version(model_settings)
         previous_loaded_model = self._find_exact_version(version)
-        # Hooks may amend preparation settings. Do not let a reused settings
-        # object mutate the configuration of the committed generation.
-        new_model = self._model_initialiser(
-            model_settings.model_copy(deep=True)
-            if previous_loaded_model is not None
-            else model_settings
-        )
 
         with model_context(model_settings):
-            new_model = await self._load_model(
-                new_model, previous_loaded_model is not None
-            )
+            try:
+                # Hooks may amend settings. Keep an existing instance's configuration
+                # intact and report a failure against the version originally requested.
+                new_model = self._model_initialiser(
+                    model_settings.model_copy(deep=True)
+                    if previous_loaded_model is not None
+                    else model_settings
+                )
+                new_model = await self._load_model(
+                    new_model, previous_loaded_model is not None
+                )
+            except Exception:
+                if previous_loaded_model is None and not parallel:
+                    self._load_failures.add((self._name, version or ""))
+                raise
             # Workers stage replacement publication until the main process
             # dispatches the old generation's unload separately.
             if not parallel:
@@ -240,6 +248,7 @@ class SingleModelRegistry:
             old.ready = False
         self._refresh_default()
         self._register(model)
+        self._load_failures.discard((self._name, model.version or ""))
         cleanup = [self._start_cleanup(old) for old in retired]
         results = await asyncio.gather(
             *(asyncio.shield(task) for task in cleanup), return_exceptions=True
@@ -678,6 +687,7 @@ class MultiModelRegistry:
             WeakValueDictionary()
         )
         self._models: dict[str, SingleModelRegistry] = {}
+        self._load_failures: set[tuple[str, str]] = set()
         self._on_model_load = on_model_load
         self._on_model_unload = on_model_unload
         self._model_initialiser = model_initialiser
@@ -711,6 +721,7 @@ class MultiModelRegistry:
                 on_model_unload=self._on_model_unload,
                 model_initialiser=self._model_initialiser,
                 model_operation_timeout=self._model_operation_timeout,
+                load_failures=self._load_failures,
             )
         try:
             return await self._models[model_settings.name].load(
@@ -789,6 +800,19 @@ class MultiModelRegistry:
     async def get_model(self, name: str, version: str | None = None) -> MLModel:
         model_registry = self._get_model_registry(name, version)
         return await model_registry.get_model(version)
+
+    def has_load_failure(self, settings: ModelSettings) -> bool:
+        return (settings.name, settings.version or "") in self._load_failures
+
+    def forget_missing_load_failures(
+        self, catalog: Sequence[ModelSettings], name: str | None = None
+    ) -> None:
+        if not self._load_failures:
+            return
+        present = {(model.name, model.version or "") for model in catalog}
+        for key in self._load_failures - present:
+            if name is None or key[0] == name:
+                self._load_failures.remove(key)
 
     async def get_models(self, name: str | None = None) -> list[MLModel]:
         if name is not None:

@@ -5,11 +5,14 @@ import os
 
 import pytest
 
+from mlserver.handlers.dataplane import DataPlane
+from mlserver.handlers.model_repository import ModelRepositoryHandlers
 from mlserver.parallel.errors import NoWorkersAvailable
 from mlserver.parallel.pool import InferencePool
 from mlserver.parallel.messages import ModelRequestMessage
 from mlserver.registry import MultiModelRegistry
 from mlserver.settings import ModelSettings, ModelParameters
+from mlserver.types import RepositoryIndexRequest, State
 from tests.fixtures import ErrorModel
 
 
@@ -69,8 +72,9 @@ async def wait_until(predicate):
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "death"])
+@pytest.mark.usefixtures("prometheus_registry")
 async def test_multiprocess_partial_load_recovery(
-    settings, sum_model_settings, inference_request, tmp_path, outcome
+    settings, sum_model_settings, inference_request, model_repository, tmp_path, outcome
 ):
     # Purpose: Exercise a replacement timeout after one of two real workers acknowledges
     # while the other later succeeds, fails or dies.
@@ -89,6 +93,10 @@ async def test_multiprocess_partial_load_recovery(
         on_model_unload=[pool.unload_model],
         model_operation_timeout=10,
     )
+    probes = DataPlane(settings, registry)
+    probes.startup_complete()
+    repository = ModelRepositoryHandlers(model_repository, registry)
+    ready_only = RepositoryIndexRequest(ready=True, include_registry_models=True)
     replacement = deepcopy(sum_model_settings)
     replacement.platform = "abandoned-platform"
     replacement.parameters.extra["lifecycle_barrier"] = str(tmp_path)
@@ -117,6 +125,17 @@ async def test_multiprocess_partial_load_recovery(
             pool._dispatcher._get_worker()
         with pytest.raises(NoWorkersAvailable):
             await unrelated.predict(inference_request)
+        for strict in (True, False):
+            settings.strict_readiness = strict
+            for _ in range(2):
+                assert await probes.ready() is (not strict)
+                assert not await probes.model_ready(old.name, old.version)
+                assert not await probes.model_ready(unrelated.name, unrelated.version)
+            for model in (old, unrelated):
+                item = await repository._to_item(model.settings)
+                assert item.state == State.UNAVAILABLE
+                assert item.reason == "Model is loaded but has no eligible worker."
+            assert not (await repository.index(ready_only)).root
         assert list(pool._worker_registry.models) == [old.settings, unrelated.settings]
         assert not pool._pending_reload
         registry._model_operation_timeout = 10
@@ -134,6 +153,14 @@ async def test_multiprocess_partial_load_recovery(
         current = await asyncio.wait_for(retry, 15)
         assert current.ready
         assert current is not old
+        settings.strict_readiness = True
+        assert await probes.ready()
+        assert await probes.model_ready(current.name, current.version)
+        assert await probes.model_ready(unrelated.name, unrelated.version)
+        assert {row.name: row.reason for row in await repository.index(ready_only)} == {
+            current.name: "",
+            unrelated.name: "",
+        }
         response = await asyncio.wait_for(current.predict(inference_request), 5)
         assert response.model_name == old.name
         assert len(response.outputs) == 1

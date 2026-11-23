@@ -93,7 +93,10 @@ async def test_abandoned_load_never_publishes(
             await registry.unload(sum_model_settings.name)
 
 
-async def test_failed_load_cleanup_remains_owned(sum_model_settings, monkeypatch):
+@pytest.mark.parametrize("by_version", [False, True])
+async def test_failed_load_cleanup_remains_owned(
+    sum_model_settings, monkeypatch, by_version
+):
     # Purpose: Combine preparation failure with failed resource cleanup.
     # Expect: The primary cause and cleanup error must both remain observable, and retry
     # cannot bypass the retained failure.
@@ -117,12 +120,21 @@ async def test_failed_load_cleanup_remains_owned(sum_model_settings, monkeypatch
         await registry.load(sum_model_settings)
     assert failure.value.__cause__ is primary
     assert failure.value.cleanup_error is cleanup
+    assert registry.has_load_failure(sum_model_settings)
     assert await registry.get_models() == []
     assert sum_model_settings.name in registry._models
     with pytest.raises(RuntimeError, match="resource still live"):
         await registry.load(sum_model_settings)
+    assert registry.has_load_failure(sum_model_settings)
     monkeypatch.setattr(model, "unload", SumModel.unload.__get__(model))
-    await registry.unload(sum_model_settings.name)
+    if by_version:
+        await registry.unload_version(
+            sum_model_settings.name, sum_model_settings.version
+        )
+    else:
+        await registry.unload(sum_model_settings.name)
+    assert sum_model_settings.name not in registry._models
+    assert registry.has_load_failure(sum_model_settings)
 
 
 async def test_unload_timeout_retains_cleanup(sum_model_settings, monkeypatch):
@@ -188,6 +200,7 @@ async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeyp
         await asyncio.wait_for(entered.wait(), 5)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(attempt), 5)
+        assert not registry.has_load_failure(sum_model_settings)
         registry._model_operation_timeout = 5
         registry._models[abandoned.name]._model_initialiser = SumModel
         retry = asyncio.create_task(registry.load(sum_model_settings))
@@ -227,6 +240,7 @@ async def test_postcommit_cleanup_failure_keeps_replacement(
     current = await registry.get_model(old.name, old.version)
     assert current is not old
     assert current.ready
+    assert not registry.has_load_failure(sum_model_settings)
     monkeypatch.setattr(old, "unload", SumModel.unload.__get__(old))
     await registry.unload(old.name)
 

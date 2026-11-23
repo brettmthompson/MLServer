@@ -101,18 +101,21 @@ async def test_response_loop_does_not_restart_after_cancellation(dispatcher, moc
     start.assert_not_called()
 
 
-async def test_on_worker_ready_adds_worker_to_routing(
-    responses,
-):
-    worker_pid = 1234
-    worker = cast(Worker, Mock(spec=Worker, pid=worker_pid))
+async def test_readiness_observes_workers_without_advancing_routing(responses):
+    first = cast(Worker, Mock(spec=Worker, pid=1234))
+    second = cast(Worker, Mock(spec=Worker, pid=5678))
     dispatcher = Dispatcher({}, responses)
-
-    dispatcher.on_worker_ready(worker)
-
-    selected_worker, selected_pid = dispatcher._get_worker()
-    assert selected_worker is worker
-    assert selected_pid == worker_pid
+    assert not dispatcher.has_ready_workers
+    dispatcher.on_worker_ready(first)
+    dispatcher.on_worker_ready(second)
+    for worker in (first, second):
+        assert dispatcher.has_ready_workers
+        assert dispatcher._get_worker() == (worker, worker.pid)
+    dispatcher.on_worker_stop(first, 0)
+    assert dispatcher.has_ready_workers
+    assert dispatcher._get_worker() == (second, second.pid)
+    dispatcher.on_worker_stop(second, 0)
+    assert not dispatcher.has_ready_workers
 
 
 async def test_dispatch_update_waits_for_worker_start(

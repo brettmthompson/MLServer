@@ -7,7 +7,12 @@ from mlserver.handlers import ModelRepositoryHandlers
 from mlserver.settings import ModelSettings, ModelParameters
 from mlserver.types import RepositoryIndexRequest, State
 
-from ..fixtures import SumModel
+from ..fixtures import ErrorModel, SumModel
+
+
+FAILED_LOAD_REASON = (
+    "Model failed to load. See the load response and server logs for details."
+)
 
 
 async def test_index(
@@ -37,6 +42,99 @@ async def test_index_unavailable_model(
     assert sum_model_settings.parameters is not None
     assert repo_index[0].version == sum_model_settings.parameters.version
     assert repo_index[0].state == State.UNAVAILABLE
+    assert repo_index[0].reason == ""
+
+
+@pytest.mark.parametrize("version", ["2", None])
+async def test_index_initial_load_failure(
+    model_repository, sum_model_settings, load_error_model_settings, version, mocker
+):
+    registry = MultiModelRegistry()
+    handlers = ModelRepositoryHandlers(model_repository, registry)
+    candidate = load_error_model_settings
+    candidate.name = sum_model_settings.name
+    candidate.parameters.version = version
+    catalog = [candidate]
+    mocker.patch.object(model_repository, "list", return_value=catalog)
+    request = RepositoryIndexRequest()
+
+    with pytest.raises(MLServerError):
+        await handlers.load(candidate.name)
+    with pytest.raises(ModelNotFound):
+        await handlers.unload(candidate.name)
+    # A different version becomes the inference default, even when the failed
+    # repository entry has no version of its own.
+    default = await registry.load(sum_model_settings)
+    assert await registry.get_model(candidate.name) is default
+    (item,) = await handlers.index(request)
+    assert item.state == State.UNAVAILABLE
+    assert item.reason == FAILED_LOAD_REASON
+    assert not (await handlers.index(RepositoryIndexRequest(ready=True))).root
+
+    catalog.clear()
+    assert not (await handlers.index(request)).root
+    catalog.append(candidate)
+    assert (await handlers.index(request))[0].reason == ""
+    with pytest.raises(MLServerError):
+        await handlers.load(candidate.name)
+    working = sum_model_settings.model_copy(deep=True)
+    working.parameters.version = version
+    await registry.load(working)
+    with pytest.raises(MLServerError):
+        await handlers.load(candidate.name)
+    (item,) = await handlers.index(request)
+    assert (item.state, item.reason) == (State.READY, "")
+    assert not registry.has_load_failure(candidate)
+    await handlers.unload(candidate.name)
+    assert (await handlers.index(request))[0].reason == ""
+
+
+async def test_index_keeps_last_failure_during_retry(
+    model_repository, load_error_model_settings, mocker
+):
+    settings = load_error_model_settings
+    registry = MultiModelRegistry()
+    handlers = ModelRepositoryHandlers(model_repository, registry)
+    mocker.patch.object(model_repository, "list", return_value=[settings])
+    request = RepositoryIndexRequest()
+    with pytest.raises(MLServerError, match=ErrorModel.error_message):
+        await handlers.load(settings.name)
+
+    retry_error = "retry failed: " + "x" * 8192
+
+    async def fail_retry(model):
+        (row,) = await handlers.index(request)
+        assert (row.state, row.reason) == (State.LOADING, "")
+        assert registry.has_load_failure(settings)
+        raise MLServerError(retry_error)
+
+    mocker.patch.object(settings.implementation, "load", fail_retry)
+    with pytest.raises(MLServerError) as failure:
+        await handlers.load(settings.name)
+    assert str(failure.value) == retry_error
+    (row,) = await handlers.index(request)
+    assert (row.state, row.reason) == (State.UNAVAILABLE, FAILED_LOAD_REASON)
+
+
+async def test_successful_retry_preserves_other_models_failure(
+    model_repository, load_error_model_settings, mocker
+):
+    first = load_error_model_settings
+    first.parameters.version = "1"
+    second = first.model_copy(deep=True, update={"name": "second"})
+    mocker.patch.object(model_repository, "list", return_value=[first, second])
+    handlers = ModelRepositoryHandlers(model_repository, MultiModelRegistry())
+    for settings in (first, second):
+        with pytest.raises(MLServerError, match=ErrorModel.error_message):
+            await handlers.load(settings.name)
+
+    first.parameters.load_error = False
+    await handlers.load(first.name)
+    rows = await handlers.index(RepositoryIndexRequest())
+    assert {row.name: (row.state, row.reason) for row in rows} == {
+        first.name: (State.READY, ""),
+        second.name: (State.UNAVAILABLE, FAILED_LOAD_REASON),
+    }
 
 
 async def test_index_excludes_registry_only_models(
@@ -159,6 +257,37 @@ async def test_unload(
 
     with pytest.raises(ModelNotFound):
         await model_registry.get_model(sum_model_settings.name)
+
+
+async def test_unload_preserves_sibling_load_failures(model_repository, mocker):
+    registry = MultiModelRegistry()
+    handlers = ModelRepositoryHandlers(model_repository, registry)
+    catalog = [
+        ModelSettings(
+            name="A",
+            implementation=ErrorModel,
+            parameters=ModelParameters(
+                version=version, load_error=version in ("3", "4")
+            ),
+        )
+        for version in ("1", "2", "3", "4")
+    ]
+    mocker.patch.object(model_repository, "list", return_value=catalog)
+    for settings in catalog[:2]:
+        await registry.load(settings)
+    for settings in catalog[2:]:
+        with pytest.raises(MLServerError, match=ErrorModel.error_message):
+            await registry.load(settings)
+
+    await handlers.unload("A")
+
+    rows = await handlers.index(RepositoryIndexRequest())
+    assert {row.version: (row.state, row.reason) for row in rows} == {
+        "1": (State.UNAVAILABLE, ""),
+        "2": (State.UNAVAILABLE, ""),
+        "3": (State.UNAVAILABLE, FAILED_LOAD_REASON),
+        "4": (State.UNAVAILABLE, FAILED_LOAD_REASON),
+    }
 
 
 async def test_unload_not_found(
@@ -524,11 +653,10 @@ async def test_union_model_settings_deduplication_and_precedence(
     assert ("model-c", "v3") in model_map
 
 
-async def test_get_state_returns_loading_for_not_ready_model(
+async def test_index_item_while_model_loads(
     model_repository_handlers: ModelRepositoryHandlers,
     model_registry: MultiModelRegistry,
 ):
-    """Test _get_state returns LOADING state for models with ready=False"""
     from ..fixtures import SlowModel
 
     # Load a slow model that takes time
@@ -539,19 +667,19 @@ async def test_get_state_returns_loading_for_not_ready_model(
     await asyncio.sleep(0.1)  # Let it start loading
 
     # Query state while loading
-    state = await model_repository_handlers._get_state(slow_settings)
-    assert state == State.LOADING
+    item = await model_repository_handlers._to_item(slow_settings)
+    assert (item.state, item.reason) == (State.LOADING, "")
 
     # Wait for load to complete
     await load_task
 
     # Now should be READY
-    state = await model_repository_handlers._get_state(slow_settings)
-    assert state == State.READY
+    item = await model_repository_handlers._to_item(slow_settings)
+    assert (item.state, item.reason) == (State.READY, "")
 
     # Unload model
     await model_registry.unload("slow-model")
 
     # Should be UNAVAILABLE
-    state = await model_repository_handlers._get_state(slow_settings)
-    assert state == State.UNAVAILABLE
+    item = await model_repository_handlers._to_item(slow_settings)
+    assert (item.state, item.reason) == (State.UNAVAILABLE, "")
