@@ -238,6 +238,16 @@ def _cuda_device_id(value: Any) -> int:
     return value
 
 
+def _cuda_graph_enabled(value: Any) -> bool:
+    # ORT stringifies provider options before parsing them in the CUDA provider.
+    flag = str(value)
+    if flag in ("1", "true", "True"):
+        return True
+    if flag in ("0", "false", "False"):
+        return False
+    raise ModelLoadError("Invalid CUDA enable_cuda_graph selection")
+
+
 def _onnx_elem_type_to_datatype(elem_type: int) -> Datatype:
     """
     Map ONNX tensor element type to MLServer Datatype.

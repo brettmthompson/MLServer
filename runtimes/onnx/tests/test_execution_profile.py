@@ -132,6 +132,12 @@ async def test_worker_profile_after_restart(
         ([{}, {"device_id": 1}], "device_id"),
         ([{}, {"enable_cuda_graph": "1"}], "enable_cuda_graph"),
         ([{"enable_cuda_graph": "0"}, {"enable_cuda_graph": "1"}], "enable_cuda_graph"),
+        ([{"enable_cuda_graph": None}], "enable_cuda_graph"),
+        ([{"enable_cuda_graph": "None"}], "enable_cuda_graph"),
+        (
+            [{"enable_cuda_graph": None}, {"enable_cuda_graph": "1"}],
+            "enable_cuda_graph",
+        ),
     ],
 )
 async def test_invalid_selection_is_not_published(
@@ -150,9 +156,82 @@ async def test_invalid_selection_is_not_published(
 
 
 @pytest.mark.parametrize(
+    "provider",
+    [
+        "CPUExecutionProvider",
+        pytest.param("CUDAExecutionProvider", marks=pytest.mark.cuda),
+    ],
+)
+@pytest.mark.parametrize(
+    "cuda_options",
+    [
+        [{"enable_cuda_graph": None}, {"enable_cuda_graph": "1"}],
+        [{"enable_cuda_graph": "None"}],
+    ],
+    ids=["repeated-null", "standalone-invalid-string"],
+)
+async def test_invalid_graph_replacement_preserves_original(
+    model_settings: ModelSettings,
+    inference_request: InferenceRequest,
+    provider: str,
+    cuda_device_id: int,
+    cuda_options: list[dict[str, Any]],
+) -> None:
+    if provider == "CUDAExecutionProvider":
+        from .test_cuda import HAS_CUDA
+
+        if not HAS_CUDA:
+            pytest.skip("Requires a working CUDA provider")
+
+    assert model_settings.parameters is not None
+    original_settings = model_settings.model_copy(deep=True)
+    assert original_settings.parameters is not None
+    original_settings.parameters.extra = {"providers": [provider]}
+    if provider == "CUDAExecutionProvider":
+        original_settings.parameters.extra.update(
+            {
+                "provider_options": [{"device_id": cuda_device_id}],
+                "session_config_entries": {"session.disable_cpu_ep_fallback": "1"},
+            }
+        )
+
+    registry = MultiModelRegistry()
+    original = await registry.load(original_settings)
+    try:
+        assert isinstance(original, OnnxModel) and original.ready
+        assert original._model.get_providers()[0] == provider
+        before = await original.predict(inference_request)
+
+        replacement = model_settings.model_copy(deep=True)
+        assert replacement.parameters is not None
+        replacement.parameters.extra = {
+            "providers": ["CUDAExecutionProvider"] * len(cuda_options)
+            + ["CPUExecutionProvider"],
+            "provider_options": [*cuda_options, {}],
+        }
+        with pytest.raises(ModelLoadError, match="enable_cuda_graph"):
+            await registry.load(replacement)
+
+        assert await registry.get_model(original.name, original.version) is original
+        assert await registry.get_models() == [original]
+        assert original.ready
+        after = await original.predict(inference_request)
+        np.testing.assert_allclose(
+            after.outputs[0].data.root, before.outputs[0].data.root
+        )
+    finally:
+        await registry.unload(original.name)
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         {"providers": ["CUDAExecutionProvider"]},
+        {
+            "providers": ["CUDAExecutionProvider"],
+            "provider_options": {"enable_cuda_graph": "1"},
+            "run_options": {"log_severity_level": 3},
+        },
         {
             "providers": ["CUDAExecutionProvider"] * 2,
             "provider_options": [{}, {"enable_cuda_graph": "0"}],

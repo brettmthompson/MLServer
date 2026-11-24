@@ -238,8 +238,9 @@ list (passed to `InferenceSession` as a sequence of option dicts per the
 [ONNX Runtime API](https://onnxruntime.ai/docs/api/python/api_summary.html)).
 `session_options` maps directly to attributes on
 `onnxruntime.SessionOptions`. `session_config_entries` provides additional
-runtime keys via `SessionOptions.add_session_config_entry`. `run_options` maps
-to `onnxruntime.RunOptions` and is applied on every `session.run()` call.
+runtime keys via `SessionOptions.add_session_config_entry`. Ordinary inference,
+including CPU fallback, passes `run_options` to `session.run()`. For CUDA graph
+replay, omit `run_options` or set it to `{}`.
 
 ### GPU Acceleration (CUDA)
 
@@ -264,10 +265,10 @@ Then configure `CUDAExecutionProvider` in your model settings:
 }
 ```
 
-Listing `CPUExecutionProvider` as a fallback ensures the model loads even if
-CUDA is unavailable. The runtime logs a warning at load time if any requested
-provider was not activated — check server logs if GPU inference is not being
-used.
+This example allows a CPU-compatible model to serve when CUDA is unavailable.
+Settings that require CUDA, such as `cuda_graph: true`, cause loading to fail
+in that case. The runtime logs a warning if a requested provider is missing
+from the loaded session.
 
 The CUDA Docker images set the environment variable
 `MLSERVER_MODEL_ONNX_PROVIDERS='["CUDAExecutionProvider","CPUExecutionProvider"]'`
@@ -289,8 +290,9 @@ serving, configure these fields under `parameters.extra`:
 The ordinal refers to the devices visible inside each worker. A pod allocated
 one GPU ordinarily sees it as device zero. With CPU fallback permitted, a
 well-formed but unavailable ordinal can result in a CPU session. Malformed
-CUDA ordinals and conflicting device or CUDA graph selections in repeated
-CUDA entries fail loading. ONNX Runtime uses the first entry for a provider.
+CUDA ordinals, invalid `enable_cuda_graph` values (including `null`), and
+conflicting device or graph selections in repeated CUDA entries fail loading.
+ONNX Runtime uses the first entry for a provider.
 MLServer rejects explicit graph-setting conflicts before configuring blocking
 synchronization. If the first CUDA entry relies on a default, MLServer checks
 a later explicit graph request against the effective setting during loading.
@@ -306,7 +308,7 @@ allowed on CPU, and check the operator trace alongside the expected outputs.
 - `session_options`: low-level runtime options such as
   `intra_op_num_threads`, `inter_op_num_threads`, and graph optimization flags.
 - `session_config_entries`: string key/value entries added to the session config.
-- `run_options`: per-run settings such as `log_severity_level` and `tag`.
+- `run_options`: per-run settings such as `log_severity_level` and `logid`.
 
 ## Performance Tuning
 
@@ -378,7 +380,14 @@ the corresponding environment variables. For example,
 `MLSERVER_MODEL_ONNX_CUDA_GRAPH=true` enables replay for ONNX models unless
 overridden in their model settings.
 
-`cuda_graph` captures and replays GPU execution using persistent device buffers
+Set `cuda_graph: true` to require graph replay. To allow CPU fallback, you
+can instead set `enable_cuda_graph: "1"` in the CUDA provider options and
+leave `cuda_graph` unset. When CUDA activates graphs, either setting uses
+the same replay path. If CUDA is unavailable, the provider-only form follows
+the session's CPU fallback policy. If both graph settings are explicit, they
+must agree.
+
+MLServer captures and replays GPU execution using persistent device buffers
 to reduce host launch work. This path requires exactly one fixed-shape FP32
 input and fixed-shape FP32 outputs. Requests must supply contiguous FP32 input
 matching the model shape, and custom `run_options` are unsupported. The example
