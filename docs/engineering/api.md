@@ -251,11 +251,17 @@ For a confirmed initial load failure, the `UNAVAILABLE` row reports
 “Model failed to load. See the load response and server logs for details.”
 The server remembers a failure for that exact name and version until it
 successfully publishes the version or observes its removal from the catalog.
-A loaded model with no eligible worker has a separate reason. A failed replacement
-leaves the serving instance's reason empty. During a retry, a `LOADING` row
-has an empty reason. Unloading a model by name preserves the reasons for
-versions that failed to load. Versions that were serving become `UNAVAILABLE`
-with an empty reason. A version with no load attempts also has an empty reason.
+
+A failed replacement does not create an initial-load failure record. If the
+previous instance can still serve, its row stays `READY` with an empty reason.
+A loaded instance with no eligible worker reports `UNAVAILABLE` with the reason
+“Model is loaded but has no eligible worker.” This can happen when a replacement
+times out and the pool is quarantined.
+
+During a retry, a `LOADING` row has an empty reason. Unloading a model by name
+preserves the reasons for versions that failed to load. Versions that were
+serving become `UNAVAILABLE` with an empty reason. A version with no load
+attempts also has an empty reason.
 
 ---
 
