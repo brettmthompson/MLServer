@@ -71,19 +71,22 @@ Both protocols use the same model sequence and their corresponding V2 fixtures.
 The mixed-model runner supports V2 gRPC (the default) and ordinary V2 JSON
 REST. It runs against one MLServer replica so repository operations and inference reach
 the same catalog. Start with a disposable repository. The scenario performs
-the specified model loads and unloads.
+the specified model loads and unloads. Running the benchmark against an existing
+server requires no ONNX installation on the client.
 
 To check the runner before collecting a baseline, run the following from the
 repository root. These checks cover output validation, missed arrivals, REST
 error reporting, and client deadlines with a real worker over both protocols.
-They run on CPU and start their own local servers.
+The checks run on CPU and start their own local servers. Only the large gRPC
+response check loads an ONNX model. If `onnx` or `mlserver-onnx` is missing
+from the Poetry environment, pytest skips that check and runs the others.
 
 ```sh
 poetry run python -m pytest tests/benchmarking/check_mixed_model.py
 ```
 
-With the ONNX runtime installed in the Poetry environment, generate the example
-and start the server from the root of the checkout.
+To generate and serve the ONNX example locally, run these commands from the
+repository root in a Poetry environment with `onnx` and `mlserver-onnx` installed.
 
 ```sh
 poetry run python -m benchmarking.mixed_model.example /tmp/w1-example
@@ -108,6 +111,15 @@ The default addresses are `localhost:8081` for gRPC and `http://localhost:8080`
 for REST. Override them with `--address`. The recorded deployment identifies
 the protocol. For a comparison keep both models, payloads, offered rate,
 worker count, and allocation fixed across runs.
+
+The gRPC client accepts serialized responses up to 4 MiB by default. For a
+model with larger outputs, add `--grpc-max-receive-message-bytes 67108864`
+to the runner command to allow up to 64 MiB per response, including protobuf
+overhead. The option accepts 1 through 2147483647 bytes. The report records
+the effective limit in `deployment.grpc_max_receive_message_bytes`. MLServer's
+`grpc_max_message_length` sets the server's send and receive limits separately
+from the client. A reply must fit both the server's send limit and the client's
+receive limit. The client option applies only to gRPC.
 
 The example warms model A, loads B while A serves, then interleaves version 1
 of A and B. Their fixed ONNX weights produce different expected values for the
@@ -155,8 +167,11 @@ measured arrivals is present and `incomplete` when measured arrivals are missing
   buffer per output, including an empty buffer for a zero-element output, and
   omit typed contents. For older databases the bound counts only correct replies,
   since they did not record this distinction. A deadline alone cannot tell
-  the client whether execution started or finished. `RESOURCE_EXHAUSTED` is a
-  rejected RPC. For REST, HTTP 429 counts as rejected, a client timeout as a
+  the client whether execution started or finished. When gRPC reports that
+  the client received an oversized message, the outcome is `client_receive_limit`.
+  Other `RESOURCE_EXHAUSTED` errors count as `rejected`. Inspect `attempt.detail`
+  in SQLite for the gRPC status and diagnostic, including the sizes gRPC reports.
+  For REST, HTTP 429 counts as rejected, a client timeout as a
   deadline, and other HTTP failures retain their status (for example, `HTTP_503`).
   Other gRPC failures retain their status code. The existing
   `parallel_request_queue` histogram samples registered response waiters,

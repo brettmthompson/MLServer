@@ -95,7 +95,13 @@ def failure(
         if code == grpc.StatusCode.DEADLINE_EXCEEDED:
             return "deadline", code.name
         if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
-            return "rejected", code.name
+            reason = exc.details() or ""
+            outcome = (
+                "client_receive_limit"
+                if reason.startswith("CLIENT: Received message larger than max")
+                else "rejected"
+            )
+            return outcome, f"{code.name}: {reason}" if reason else code.name
         return "rpc_error", code.name
     if isinstance(exc, TimeoutError):
         return "deadline", "CLIENT_TIMEOUT"

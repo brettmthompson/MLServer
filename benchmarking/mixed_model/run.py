@@ -311,7 +311,9 @@ async def run(
                 action.operation, action.model, scenario.management_timeout_s
             )
             status = "OK"
-        except (grpc.aio.AioRpcError, aiohttp.ClientError, TimeoutError) as exc:
+        except grpc.aio.AioRpcError as exc:
+            status = exc.code().name
+        except (aiohttp.ClientError, TimeoutError) as exc:
             _, status = failure(exc)
         db.execute(
             "INSERT INTO lifecycle VALUES(?,?,?,?,?,?,?,?)",
@@ -442,14 +444,30 @@ async def run(
         db.commit()
 
 
-async def main() -> None:
+async def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", type=Path)
     parser.add_argument("database", type=Path)
     parser.add_argument("--protocol", choices=("grpc", "rest"), default="grpc")
     parser.add_argument("--address", help="host:port for gRPC or base URL for REST")
+    parser.add_argument(
+        "--grpc-max-receive-message-bytes",
+        type=int,
+        metavar="BYTES",
+        help="maximum serialized gRPC reply size in bytes (default: 4194304)",
+    )
     parser.add_argument("--local-resources", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    receive_limit = args.grpc_max_receive_message_bytes
+    if receive_limit is not None:
+        if args.protocol != "grpc":
+            parser.error("--grpc-max-receive-message-bytes requires --protocol grpc")
+        if not 1 <= receive_limit <= 2**31 - 1:
+            parser.error(
+                "--grpc-max-receive-message-bytes must be between 1 and 2147483647"
+            )
+    else:
+        receive_limit = 4 * 1024**2
     scenario = Scenario.model_validate_json(args.scenario.read_text())
     db = database(args.database)
     try:
@@ -461,7 +479,10 @@ async def main() -> None:
                 await run(scenario, session, db, address, args.local_resources)
         else:
             address = args.address or "localhost:8081"
-            async with grpc.aio.insecure_channel(address) as channel:
+            scenario.deployment["grpc_max_receive_message_bytes"] = receive_limit
+            async with grpc.aio.insecure_channel(
+                address, options=[("grpc.max_receive_message_length", receive_limit)]
+            ) as channel:
                 await run(
                     scenario,
                     GRPCInferenceServiceStub(channel),

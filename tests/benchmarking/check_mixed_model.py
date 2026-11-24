@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -18,20 +19,22 @@ import pytest
 import uvicorn
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from grpc import aio
+from grpc import StatusCode, aio
 
 from benchmarking.mixed_model.report import summary
-from benchmarking.mixed_model.run import Scenario, check_output, database, run
-from benchmarking.mixed_model.transport import GrpcCalls
+from benchmarking.mixed_model.run import Scenario, check_output, database, main, run
+from benchmarking.mixed_model.transport import GrpcCalls, failure
 from mlserver import Settings
 from mlserver.grpc import GRPCServer
 from mlserver.grpc import dataplane_pb2 as pb
 from mlserver.grpc.converters import ModelInferRequestConverter
 from mlserver.grpc.dataplane_pb2_grpc import GRPCInferenceServiceStub
+from mlserver.handlers import DataPlane, ModelRepositoryHandlers
 from mlserver.logging import ModelLoggerFormatter
 from mlserver.parallel import InferencePoolRegistry
 from mlserver.registry import MultiModelRegistry
 from mlserver.rest.app import create_app
+from mlserver.settings import ModelParameters, ModelSettings
 from mlserver.types import ResponseOutput
 
 
@@ -455,6 +458,118 @@ async def test_client_deadline_precedes_real_worker_completion(
         (tmp_path / "release").touch()
         await task
         db.close()
+
+
+@pytest.mark.parametrize(
+    "protocol,limit",
+    [("grpc", "0"), ("grpc", "-1"), ("grpc", str(2**31)), ("rest", "1024")],
+)
+async def test_invalid_grpc_receive_limit(protocol, limit, tmp_path, capsys):
+    db_path = tmp_path / "run.sqlite"
+    args = ["scenario.json", str(db_path), "--protocol", protocol]
+    with pytest.raises(SystemExit) as error:
+        await main([*args, "--grpc-max-receive-message-bytes", limit])
+    assert error.value.code == 2
+    assert "--grpc-max-receive-message-bytes" in capsys.readouterr().err
+    assert not db_path.exists()
+
+
+def test_grpc_server_rejection_keeps_its_diagnostic():
+    error = aio.AioRpcError(
+        StatusCode.RESOURCE_EXHAUSTED,
+        aio.Metadata(),
+        aio.Metadata(),
+        "server queue full",
+    )
+    assert failure(error) == ("rejected", "RESOURCE_EXHAUSTED: server queue full")
+
+
+async def test_grpc_large_onnx_response(
+    tmp_path, settings, model_repository, prometheus_registry, unused_tcp_port
+):
+    onnx = pytest.importorskip("onnx")
+    runtime = pytest.importorskip("mlserver_onnx")
+    # Expand a 16-byte input into more than 4 MiB of FP64 output.
+    rows = 2**18 + 1
+    helper = onnx.helper
+    graph = helper.make_graph(
+        [helper.make_node("Expand", ["input-0", "shape"], ["y"])],
+        "large-reply",
+        [helper.make_tensor_value_info("input-0", onnx.TensorProto.DOUBLE, [1, 2])],
+        [helper.make_tensor_value_info("y", onnx.TensorProto.DOUBLE, [rows, 2])],
+        [helper.make_tensor("shape", onnx.TensorProto.INT64, [2], [rows, 2])],
+    )
+    path = tmp_path / "model.onnx"
+    onnx.save(
+        helper.make_model(
+            graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=9
+        ),
+        path,
+    )
+    registry = MultiModelRegistry()
+    model = await registry.load(
+        ModelSettings(
+            name="large-reply",
+            implementation=runtime.OnnxModel,
+            parameters=ModelParameters(
+                uri=str(path),
+                version="1",
+                extra={"providers": ["CPUExecutionProvider"]},
+            ),
+        )
+    )
+    settings.grpc_port = unused_tcp_port
+    settings.grpc_max_message_length = 8 * 1024**2
+    server = GRPCServer(
+        settings,
+        DataPlane(settings, registry),
+        ModelRepositoryHandlers(model_repository, registry),
+    )._create_server()
+    await server.start()
+    try:
+        config = scenario(model.name, rate=1, duration_s=0.1, deadline_s=30)
+        target = config.models[0]
+        target.artifact_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        target.request.inputs[0].datatype = "FP64"
+        target.expected = [
+            ResponseOutput(
+                name="predict", shape=[rows, 2], datatype="FP64", data=[1, 2] * rows
+            )
+        ]
+        scenario_path = tmp_path / "scenario.json"
+        scenario_path.write_text(config.model_dump_json())
+        args = ["--address", f"127.0.0.1:{unused_tcp_port}", str(scenario_path)]
+        attempt = "SELECT outcome, detail, verified_reply FROM attempt"
+        default_db = tmp_path / "default.sqlite"
+        with pytest.raises(SystemExit) as error:
+            await main([*args, str(default_db)])
+        assert error.value.code == 1
+        with closing(sqlite3.connect(default_db)) as db:
+            ((outcome, detail, verified),) = db.execute(attempt)
+            assert (outcome, verified) == ("client_receive_limit", 0)
+            assert (
+                "RESOURCE_EXHAUSTED: CLIENT: Received message larger than max" in detail
+            )
+            assert "4194304" in detail
+
+        configured_db = tmp_path / "configured.sqlite"
+        await main(
+            [
+                *args,
+                str(configured_db),
+                "--grpc-max-receive-message-bytes",
+                str(8 * 1024**2),
+            ]
+        )
+        with closing(sqlite3.connect(configured_db)) as db:
+            assert db.execute(attempt).fetchall() == [("correct", "", 1)]
+            assert (
+                summary(db)["deployment"]["grpc_max_receive_message_bytes"]
+                == 8 * 1024**2
+            )
+    finally:
+        await server.stop(grace=None)
+        await registry.unload(model.name)
 
 
 async def test_rest_records_management_status_and_inference_errors(tmp_path):
