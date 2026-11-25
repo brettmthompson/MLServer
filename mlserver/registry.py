@@ -4,7 +4,7 @@ from contextvars import ContextVar
 
 from collections.abc import Awaitable, Callable, Sequence
 from itertools import chain
-from functools import cmp_to_key
+from functools import cmp_to_key, partial
 from prometheus_client import Counter
 
 from .context import model_context
@@ -112,6 +112,9 @@ class SingleModelRegistry:
     ):
         # Recorded failures survive removal of an empty single-model registry.
         self._load_failures = load_failures if load_failures is not None else set()
+        # One initial load per name can own preparation at a time. Its original
+        # key object identifies the attempt even if a hook changes the version.
+        self._initial_load: tuple[str, str] | None = None
         self._operation_lock = asyncio.Lock()
         self._versions: dict[str, MLModel] = {}
         self._pending_reload: dict[str, MLModel] = {}
@@ -207,6 +210,10 @@ class SingleModelRegistry:
         await self._drain_cleanup()
         version = _get_version(model_settings)
         previous_loaded_model = self._find_exact_version(version)
+        attempt = None
+        if previous_loaded_model is None and not parallel:
+            attempt = (self._name, version or "")
+        self._initial_load = attempt
 
         with model_context(model_settings):
             try:
@@ -218,12 +225,12 @@ class SingleModelRegistry:
                     else model_settings
                 )
                 new_model = await self._load_model(
-                    new_model, previous_loaded_model is not None
+                    new_model, previous_loaded_model is not None, attempt
                 )
             except Exception:
-                if previous_loaded_model is None and not parallel:
-                    self._load_failures.add((self._name, version or ""))
+                self._finish_initial_load(attempt, failed=True)
                 raise
+            self._finish_initial_load(attempt, failed=False)
             # Workers stage replacement publication until the main process
             # dispatches the old generation's unload separately.
             if not parallel:
@@ -257,7 +264,30 @@ class SingleModelRegistry:
             if isinstance(result, BaseException):
                 raise result
 
-    async def _load_model(self, model: MLModel, reload: bool = False):
+    def _finish_initial_load(
+        self, attempt: tuple[str, str] | None, *, failed: bool
+    ) -> None:
+        # Catalog removal or a subsequent attempt can invalidate this observer.
+        if attempt is not None and self._initial_load is attempt:
+            if failed:
+                self._load_failures.add(attempt)
+            self._initial_load = None
+
+    def _abandoned_preparation_done(
+        self, attempt: tuple[str, str] | None, model_msg: str, task: asyncio.Task[bool]
+    ) -> None:
+        error = None
+        if not task.cancelled():
+            error = task.exception()
+            if error is None and not task.result():
+                error = ModelLoadError(f"Model load returned False for {model_msg}.")
+        self._finish_initial_load(attempt, failed=error is not None)
+        if error is not None:
+            logger.error("Abandoned load of %s failed.", model_msg, exc_info=error)
+
+    async def _load_model(
+        self, model: MLModel, reload: bool, attempt: tuple[str, str] | None
+    ):
         model_msg = f"model '{model.name}'"
         version = _get_version(model.settings) or ""
         if version:
@@ -311,6 +341,15 @@ class SingleModelRegistry:
             for hooked in hook_models:
                 hooked._load_complete()
         except (Exception, asyncio.CancelledError) as load_error:
+            if isinstance(load_error, asyncio.CancelledError):
+                if preparation is None:
+                    self._finish_initial_load(attempt, failed=False)
+                else:
+                    # Observe the exact retained preparation even if its cleanup
+                    # waiter is later cancelled or retried.
+                    preparation.add_done_callback(
+                        partial(self._abandoned_preparation_done, attempt, model_msg)
+                    )
             for hooked in hook_models:
                 hooked._load_failed()
             logger.error(f"Failed to load {model_msg}. Attempting cleanup...")
@@ -585,8 +624,8 @@ class SingleModelRegistry:
                     )
                 raise
             except Exception:
-                # Preparation errors are reported by the load caller. They do
-                # not remove the obligation to release partially built state.
+                # The caller or the abandoned preparation's observer reports
+                # this error. Cleanup must still release partially built state.
                 pass
         with model_context(model.settings):
             failures = []
@@ -807,9 +846,18 @@ class MultiModelRegistry:
     def forget_missing_load_failures(
         self, catalog: Sequence[ModelSettings], name: str | None = None
     ) -> None:
-        if not self._load_failures:
+        registries = (
+            self._models.values() if name is None else (self._models.get(name),)
+        )
+        pending = [
+            r for r in registries if r is not None and r._initial_load is not None
+        ]
+        if not self._load_failures and not pending:
             return
         present = {(model.name, model.version or "") for model in catalog}
+        for registry in pending:
+            if registry._initial_load not in present:
+                registry._initial_load = None
         for key in self._load_failures - present:
             if name is None or key[0] == name:
                 self._load_failures.remove(key)

@@ -197,7 +197,9 @@ class Dispatcher:
     @property
     def has_ready_workers(self) -> bool:
         """Read routing eligibility without selecting a worker."""
-        return bool(self._ready_workers)
+        return bool(self._ready_workers) and (
+            self._transport is None or self._transport.can_send
+        )
 
     def _reset_round_robin(self) -> Iterator[int]:
         worker_pids = list(self._ready_workers.keys())

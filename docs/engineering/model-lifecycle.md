@@ -30,7 +30,7 @@ not establish lifetime ownership for every accepted inference request.
 | Registered | A frontend lookup can find the instance. A fresh loading entry can be registered before it is ready. |
 | Prepared | Runtime loading and load hooks have succeeded for the candidate. A replacement can be prepared without being committed. |
 | Committed | This instance/configuration is the selected generation. Replacement publication occurs before releasing the displaced instance. |
-| Ready | The lifecycle flag records successful loading. Public model readiness also requires an eligible worker for a parallel model. |
+| Ready | The lifecycle flag records successful loading. For a parallel model, public readiness also requires a routable worker and, when using ZeroMQ, a working response receiver. |
 | Routable worker | The dispatcher may select this worker. Quarantine removes eligibility even when committed frontend settings remain intact. |
 | Retired | The instance has lost serving eligibility; it may still own resources or unfinished cleanup. |
 | Released | Cleanup has completed, or native process exit and parent-resource retirement have been confirmed. Removing a dictionary entry is insufficient evidence. |

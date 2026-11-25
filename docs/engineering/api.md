@@ -251,6 +251,12 @@ For a confirmed initial load failure, the `UNAVAILABLE` row reports
 “Model failed to load. See the load response and server logs for details.”
 The server remembers a failure for that exact name and version until it
 successfully publishes the version or observes its removal from the catalog.
+If an initial load times out, the caller receives the timeout. If the runtime
+later raises an exception or returns `False`, the server logs the cause. It
+records the bounded reason only if that attempt is still current at settlement.
+Observing catalog removal invalidates the attempt, even if the same version
+reappears before preparation finishes. A pending or cancelled preparation, or a
+successful preparation abandoned at the deadline, does not create a failure record.
 
 A failed replacement does not create an initial-load failure record. If the
 previous instance can still serve, its row stays `READY` with an empty reason.

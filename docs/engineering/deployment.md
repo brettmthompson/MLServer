@@ -218,19 +218,24 @@ In both modes the server is not ready until startup completes, so traffic is not
 #### Model availability and routing
 
 For a parallel model, model readiness requires at least one worker eligible to
-serve its pool. If recovery withdraws all of those workers, the model probe
+serve its pool. If recovery withdraws all of those workers or the pool's
+ZeroMQ response receiver fails permanently, the model probe
 returns false. Its repository index row, when included, reports `UNAVAILABLE`.
 Strict server readiness also becomes false. Lenient server readiness keeps its
 configured behavior, including when every loaded model has lost its workers.
-An independent pool can still serve its models. Probes only observe state;
-the pool restores worker eligibility in the dispatcher after recovery confirms
-replay.
+An independent pool can still serve its models. Probes only observe state.
+After worker recovery, the pool restores eligibility once replay succeeds.
+A terminal receiver failure persists for the lifetime of that transport.
+Once unloading the last model retires a named pool, the next load for that
+pool starts a fresh receiver.
 
 For direct versioned inference through REST or gRPC, an absent model returns
 HTTP 404 or gRPC `NOT_FOUND`. A registered candidate still loading returns
 HTTP 400 or `INVALID_ARGUMENT`. If a loaded model's pool has no eligible
-workers, inference returns HTTP 503 or the existing gRPC `UNKNOWN` status with
-the no-workers error. A replica withdrawn by the platform may instead be
+workers available for selection, inference returns HTTP 503 or the existing
+gRPC `UNKNOWN` status with the no-workers error. A terminal ZeroMQ response
+transport failure with workers still selected surfaces as HTTP 500 or gRPC
+`INTERNAL`. A replica withdrawn by the platform may instead be
 unreachable through the Service.
 
 Choose the probe together with the replica layout. When a pod readiness probe

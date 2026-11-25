@@ -172,7 +172,10 @@ async def test_unload_timeout_retains_cleanup(sum_model_settings, monkeypatch):
         await asyncio.gather(operation, return_exceptions=True)
 
 
-async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeypatch):
+@pytest.mark.parametrize("prepared", [True, False])
+async def test_retry_waits_for_abandoned_preparation(
+    sum_model_settings, monkeypatch, prepared
+):
     # Purpose: Exercise retry while an abandoned candidate is still preparing.
     # Expect: The retry must wait for settlement and cleanup, then publish a distinct
     # ready instance.
@@ -180,16 +183,23 @@ async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeyp
     # release the barrier and compare model identities and cleanup events.
     registry = MultiModelRegistry(model_operation_timeout=0.05)
     entered, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cleaning, release_cleanup = asyncio.Event(), asyncio.Event()
     abandoned = SumModel(sum_model_settings)
 
     async def load():
         entered.set()
         await release.wait()
-        return True
+        return prepared
 
     async def unload():
+        cleaning.set()
+        await release_cleanup.wait()
         cleaned.set()
         return True
+
+    def initialise_retry(settings):
+        assert cleaned.is_set()
+        return SumModel(settings)
 
     monkeypatch.setattr(abandoned, "load", load)
     monkeypatch.setattr(abandoned, "unload", unload)
@@ -202,18 +212,21 @@ async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeyp
             await asyncio.wait_for(asyncio.shield(attempt), 5)
         assert not registry.has_load_failure(sum_model_settings)
         registry._model_operation_timeout = 5
-        registry._models[abandoned.name]._model_initialiser = SumModel
+        registry._models[abandoned.name]._model_initialiser = initialise_retry
         retry = asyncio.create_task(registry.load(sum_model_settings))
         await asyncio.sleep(0)
         assert not retry.done()
         release.set()
+        await asyncio.wait_for(cleaning.wait(), 5)
+        release_cleanup.set()
         current = await asyncio.wait_for(retry, 5)
-        assert cleaned.is_set()
         assert current is not abandoned
         assert current.ready
+        assert not registry.has_load_failure(sum_model_settings)
         assert await registry.get_model(current.name, current.version) is current
     finally:
         release.set()
+        release_cleanup.set()
         await asyncio.gather(
             attempt, *([retry] if retry else []), return_exceptions=True
         )

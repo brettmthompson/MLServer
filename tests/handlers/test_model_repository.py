@@ -1,7 +1,13 @@
 import pytest
 import asyncio
+from unittest.mock import patch
 
-from mlserver.errors import ModelNotFound, MLServerError
+from mlserver.errors import (
+    ModelLoadError,
+    ModelNotFound,
+    ModelUnloadError,
+    MLServerError,
+)
 from mlserver.registry import MultiModelRegistry
 from mlserver.handlers import ModelRepositoryHandlers
 from mlserver.settings import ModelSettings, ModelParameters
@@ -683,3 +689,203 @@ async def test_index_item_while_model_loads(
     # Should be UNAVAILABLE
     item = await model_repository_handlers._to_item(slow_settings)
     assert (item.state, item.reason) == (State.UNAVAILABLE, "")
+
+
+@pytest.fixture
+def abandoned_load(model_repository, sum_model_settings, mocker):
+    """Hold a SumModel load past its deadline and release it on demand."""
+    registry = MultiModelRegistry(model_operation_timeout=5)
+    handlers = ModelRepositoryHandlers(model_repository, registry)
+    catalog = [sum_model_settings]
+    mocker.patch.object(model_repository, "list", return_value=catalog)
+
+    async def index():
+        return {
+            (item.name, item.version): (item.state, item.reason)
+            for item in await handlers.index(RepositoryIndexRequest())
+        }
+
+    async def start(outcome, *, cleanup_error=None):
+        entered = asyncio.get_running_loop().create_future()
+        release = asyncio.Event()
+
+        async def prepare(model):
+            entered.set_result(model)
+            await release.wait()
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        registry._model_operation_timeout = 0.1
+        with patch.object(sum_model_settings.implementation, "load", prepare):
+            operation = asyncio.create_task(
+                registry.load(sum_model_settings.model_copy(deep=True))
+            )
+            try:
+                candidate = await entered
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.shield(operation)
+            except BaseException:
+                release.set()
+                raise
+        if cleanup_error:
+            mocker.patch.object(candidate, "unload", side_effect=cleanup_error)
+        single = registry._models[candidate.name]
+        registry._model_operation_timeout = 5
+        return candidate, release, single._cleanup_tasks[candidate]
+
+    return registry, catalog, index, start
+
+
+@pytest.mark.parametrize("outcome", [ValueError("late preparation error"), False, True])
+async def test_index_after_abandoned_preparation(
+    abandoned_load, outcome, caplog, mocker
+):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    key = requested.name, requested.version
+    sibling = requested.model_copy(deep=True)
+    sibling.parameters.version = "sibling"
+    catalog.append(sibling)
+    async with asyncio.timeout(10):
+        await registry.load(sibling)
+        candidate, release, cleanup = await start(outcome)
+        try:
+            assert not cleanup.done()
+            assert (await index())[key] == (State.UNAVAILABLE, "")
+            assert not registry.has_load_failure(requested)
+        finally:
+            release.set()
+        await asyncio.shield(cleanup)
+        failed = outcome is not True
+        assert (await index()) == {
+            key: (State.UNAVAILABLE, FAILED_LOAD_REASON if failed else ""),
+            (sibling.name, sibling.version): (State.READY, ""),
+        }
+        with pytest.raises(ModelNotFound):
+            await registry.get_model(*key)
+        if failed:
+            assert (
+                "returned False" if outcome is False else str(outcome)
+            ) in caplog.text
+
+        async def prepare_retry(model):
+            assert (await index())[key] == (State.LOADING, "")
+            assert registry.has_load_failure(requested) is failed
+            return True
+
+        mocker.patch.object(requested.implementation, "load", prepare_retry)
+        current = await registry.load(requested)
+        assert current is not candidate
+        assert await registry.get_model(*key) is current
+        assert (await index())[key] == (State.READY, "")
+        assert not registry.has_load_failure(requested)
+
+
+@pytest.mark.parametrize("previous_failure", [False, True])
+async def test_catalog_removal_invalidates_abandoned_load(
+    abandoned_load, previous_failure
+):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    key = requested.name, requested.version
+    async with asyncio.timeout(10):
+        if previous_failure:
+            with patch.object(requested.implementation, "load", return_value=False):
+                with pytest.raises(ModelLoadError, match="returned False"):
+                    await registry.load(requested)
+            assert (await index())[key] == (State.UNAVAILABLE, FAILED_LOAD_REASON)
+        _, release, cleanup = await start(ValueError("obsolete load"))
+        try:
+            catalog.clear()
+            assert await index() == {}
+            catalog.append(requested)
+        finally:
+            release.set()
+        await asyncio.shield(cleanup)
+        assert (await index())[key] == (State.UNAVAILABLE, "")
+        assert not registry.has_load_failure(requested)
+
+
+async def test_abandoned_load_keeps_preparation_and_cleanup_failures(
+    abandoned_load, caplog, mocker
+):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    primary = ValueError("late preparation error")
+    secondary = RuntimeError("resource still held")
+    async with asyncio.timeout(10):
+        candidate, release, cleanup = await start(primary, cleanup_error=secondary)
+        release.set()
+        with pytest.raises(RuntimeError) as error:
+            await asyncio.shield(cleanup)
+        assert error.value is secondary
+        assert {record.exc_info[1] for record in caplog.records if record.exc_info} >= {
+            primary,
+            secondary,
+        }
+        assert (await index())[(requested.name, requested.version)] == (
+            State.UNAVAILABLE,
+            FAILED_LOAD_REASON,
+        )
+        with pytest.raises(RuntimeError) as retry:
+            await registry.load(requested)
+        assert retry.value is secondary
+        mocker.stop(candidate.unload)
+        await registry.unload(requested.name)
+        assert registry.has_load_failure(requested)
+
+
+async def test_abandoned_replacement_failure_leaves_original_ready(abandoned_load):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    key = requested.name, requested.version
+    async with asyncio.timeout(10):
+        original = await registry.load(requested)
+        _, release, cleanup = await start(ValueError("failed replacement"))
+        release.set()
+        await asyncio.shield(cleanup)
+        assert await registry.get_model(*key) is original
+        assert (await index())[key] == (State.READY, "")
+        assert not registry.has_load_failure(requested)
+
+
+async def test_cancelled_preparation_keeps_uncertain_reason(abandoned_load):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    async with asyncio.timeout(10):
+        _, release, cleanup = await start(asyncio.CancelledError())
+        release.set()
+        with pytest.raises(ModelUnloadError, match="ownership is retained"):
+            await asyncio.shield(cleanup)
+        assert (await index())[(requested.name, requested.version)] == (
+            State.UNAVAILABLE,
+            "",
+        )
+        assert not registry.has_load_failure(requested)
+
+
+async def test_abandoned_failure_uses_requested_version(abandoned_load):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    redirected = requested.model_copy(deep=True)
+    redirected.parameters.version = "redirected"
+    catalog.append(redirected)
+
+    async def change_version(model):
+        model.settings.parameters.version = redirected.version
+        return model
+
+    registry._on_model_load = [change_version]
+    async with asyncio.timeout(10):
+        candidate, release, cleanup = await start(False)
+        release.set()
+        await asyncio.shield(cleanup)
+        assert candidate.version == redirected.version
+        assert await index() == {
+            (requested.name, requested.version): (
+                State.UNAVAILABLE,
+                FAILED_LOAD_REASON,
+            ),
+            (redirected.name, redirected.version): (State.UNAVAILABLE, ""),
+        }
