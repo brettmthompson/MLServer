@@ -1,6 +1,7 @@
 import asyncio
 import json
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 
 from collections.abc import Awaitable, Callable, Sequence
 from itertools import chain
@@ -17,8 +18,22 @@ from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .metrics.context import MODEL_NAME_LABEL, MODEL_VERSION_LABEL
 from mlserver.errors import ModelLoadError, ModelUnloadError
 
-_model_load_hooks_active: ContextVar[bool] = ContextVar(
-    "model_load_hooks_active", default=False
+_LoadObserver = Callable[[BaseException | None], None]
+_ObserveWorkerLoad = Callable[[_LoadObserver], None]
+
+
+@dataclass
+class _ModelLoadHook:
+    """Worker settlements that this invocation can pass to its frontend load."""
+
+    owner: asyncio.Task | None
+    settlements: dict[asyncio.CancelledError | int, _ObserveWorkerLoad] = field(
+        default_factory=dict
+    )
+
+
+_model_load_hook: ContextVar[_ModelLoadHook | None] = ContextVar(
+    "model_load_hook", default=None
 )
 
 ModelInitialiser = Callable[[ModelSettings], MLModel]
@@ -281,6 +296,14 @@ class SingleModelRegistry:
             error = task.exception()
             if error is None and not task.result():
                 error = ModelLoadError(f"Model load returned False for {model_msg}.")
+        self._abandoned_load_settled(attempt, model_msg, error)
+
+    def _abandoned_load_settled(
+        self,
+        attempt: tuple[str, str] | None,
+        model_msg: str,
+        error: BaseException | None,
+    ) -> None:
         self._finish_initial_load(attempt, failed=error is not None)
         if error is not None:
             logger.error("Abandoned load of %s failed.", model_msg, exc_info=error)
@@ -293,6 +316,7 @@ class SingleModelRegistry:
         if version:
             model_msg = f"version {model.version} of {model_msg}"
 
+        observe_worker_load = None
         preparation = None
         initial_model = model
         hook_models = []
@@ -310,14 +334,22 @@ class SingleModelRegistry:
 
             try:
                 for callback in self._on_model_load:
-                    # NOTE: Callbacks need to be executed sequentially to ensure that
-                    # they go in the right order
-                    token = _model_load_hooks_active.set(True)
+                    hook = _ModelLoadHook(asyncio.current_task())
+                    token = _model_load_hook.set(hook)
                     try:
                         model = await callback(model)
                         hook_models.append(model)
+                    except asyncio.CancelledError as error:
+                        # A direct await preserves the worker's cancellation. A task
+                        # group may propagate a new one for the same candidate.
+                        observe_worker_load = hook.settlements.get(
+                            error
+                        ) or hook.settlements.get(id(model))
+                        raise
                     finally:
-                        _model_load_hooks_active.reset(token)
+                        _model_load_hook.reset(token)
+                        hook.owner = None
+                        hook.settlements.clear()
             finally:
                 # Register model again to ensure we save version modified by hooks
                 if reload:
@@ -342,14 +374,18 @@ class SingleModelRegistry:
                 hooked._load_complete()
         except (Exception, asyncio.CancelledError) as load_error:
             if isinstance(load_error, asyncio.CancelledError):
-                if preparation is None:
-                    self._finish_initial_load(attempt, failed=False)
-                else:
+                if preparation is not None:
                     # Observe the exact retained preparation even if its cleanup
                     # waiter is later cancelled or retried.
                     preparation.add_done_callback(
                         partial(self._abandoned_preparation_done, attempt, model_msg)
                     )
+                elif observe_worker_load is not None:
+                    observe_worker_load(
+                        partial(self._abandoned_load_settled, attempt, model_msg)
+                    )
+                else:
+                    self._finish_initial_load(attempt, failed=False)
             for hooked in hook_models:
                 hooked._load_failed()
             logger.error(f"Failed to load {model_msg}. Attempting cleanup...")

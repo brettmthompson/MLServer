@@ -1,3 +1,5 @@
+from asyncio import CancelledError
+
 from fastapi import status
 
 from ..model import MLModel
@@ -51,6 +53,8 @@ class WorkerError(MLServerError):
     """
 
     def __init__(self, exc: BaseException):
+        # The parent receives this wrapper across IPC, without the original type.
+        self._interrupted = isinstance(exc, (CancelledError, TimeoutError))
         msg = str(exc)
         if isinstance(exc, BaseException):
             exc_class = exc.__class__

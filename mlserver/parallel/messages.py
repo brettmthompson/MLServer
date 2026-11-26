@@ -2,7 +2,7 @@ import json
 
 from asyncio import CancelledError
 from enum import IntEnum
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, PrivateAttr
 from typing import Any
 
 from ..utils import generate_uuid
@@ -43,6 +43,8 @@ class ModelUpdateMessage(Message):
     update_type: ModelUpdateType
     serialised_model_settings: str
     rollback: bool = False
+    # Populated on the parent's original broadcast only after workers reply.
+    _load_failure: Exception | None = PrivateAttr(default=None)
 
     def __init__(self, *args, **kwargs):
         model_settings = kwargs.pop("model_settings", None)

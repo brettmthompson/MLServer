@@ -16,7 +16,7 @@ from ..utils import (
 )
 from ..metrics import REGISTRY
 
-from .errors import WorkerStop, NoWorkersAvailable
+from .errors import WorkerError, WorkerStop, NoWorkersAvailable
 from .worker import Worker
 from .logging import logger
 from .utils import END_OF_QUEUE, cancel_task
@@ -333,6 +333,7 @@ class Dispatcher:
     async def dispatch_update(
         self, model_update: ModelUpdateMessage
     ) -> list[ModelResponseMessage]:
+        model_update._load_failure = None
         # Dispatch to all workers concurrently and wait for results
         # to ensure state is properly maintained
         results = await asyncio.gather(
@@ -352,6 +353,13 @@ class Dispatcher:
 
         # If any error other than a worker stop error is returned raise immediately
         if non_stop:
+            if model_update.update_type == ModelUpdateType.Load:
+                # A different worker may have confirmed a load failure even
+                # when the primary dispatch error was a transport failure.
+                for reply in results:
+                    if isinstance(reply, WorkerError) and not reply._interrupted:
+                        model_update._load_failure = reply
+                        break
             raise non_stop
         # If every worker stopped without returning a successful response, a
         # load cannot establish model state and must fail so the caller can

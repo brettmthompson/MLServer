@@ -4,7 +4,7 @@ from unittest.mock import Mock
 from typing import cast
 
 from mlserver.types import InferenceResponse
-from mlserver.parallel.errors import WorkerStop, NoWorkersAvailable
+from mlserver.parallel.errors import WorkerError, WorkerStop, NoWorkersAvailable
 from mlserver.parallel.dispatcher import Dispatcher
 from mlserver.parallel.messages import (
     ModelResponseMessage,
@@ -182,10 +182,21 @@ async def test_dispatch_update_serializes_updates(
     await asyncio.gather(first_update, second_update)
 
 
+@pytest.mark.parametrize(
+    "second_reply, confirmed",
+    [
+        (ModelResponseMessage(), False),
+        (WorkerError(TimeoutError()), False),
+        (WorkerError(asyncio.CancelledError()), False),
+        (WorkerError(ValueError("load failed")), True),
+    ],
+)
 async def test_dispatch_update_raises_non_worker_error(
     responses,
     load_message: ModelUpdateMessage,
     mocker,
+    second_reply,
+    confirmed,
 ):
     first_pid = 1234
     second_pid = 5678
@@ -197,11 +208,36 @@ async def test_dispatch_update_raises_non_worker_error(
     mocker.patch.object(
         dispatcher,
         "dispatch_update_to_worker",
-        side_effect=[RuntimeError("update failed"), ModelResponseMessage()],
+        side_effect=[RuntimeError("update failed"), second_reply],
     )
 
     with pytest.raises(RuntimeError, match="update failed"):
         await dispatcher.dispatch_update(load_message)
+    assert load_message._load_failure is (second_reply if confirmed else None)
+
+
+async def test_load_failure_is_scoped_to_one_broadcast(
+    responses, load_message, unload_message, mocker
+):
+    pid = 1234
+    worker = cast(Worker, Mock(spec=Worker, pid=pid))
+    dispatcher = Dispatcher({pid: worker}, responses)
+    failure = WorkerError(ValueError("worker update failed"))
+    success = ModelResponseMessage()
+    mocker.patch.object(
+        dispatcher, "dispatch_update_to_worker", side_effect=[failure, success, failure]
+    )
+
+    with pytest.raises(WorkerError):
+        await dispatcher.dispatch_update(load_message)
+    assert load_message._load_failure is failure
+
+    assert await dispatcher.dispatch_update(load_message) == [success]
+    assert load_message._load_failure is None
+
+    with pytest.raises(WorkerError):
+        await dispatcher.dispatch_update(unload_message)
+    assert unload_message._load_failure is None
 
 
 async def test_dispatch_update_raises_when_all_workers_stop_for_load(

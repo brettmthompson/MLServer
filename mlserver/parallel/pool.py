@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from prometheus_client import Counter
 
 from ..model import MLModel
-from ..registry import _model_load_hooks_active
+from ..registry import _LoadObserver, _model_load_hook
 from ..utils import defer_cancellation, with_operation_lock, create_task_independent
 from ..types import InferenceRequest, InferenceResponse
 from ..settings import Settings, ModelSettings
@@ -549,13 +549,13 @@ class InferencePool:
                 model_settings=model.settings,  # type: ignore
                 rollback=reload,
             )
-            await self._dispatch_owned(load_message)
+            await self._dispatch_owned(load_message, model)
             prepared = load_message
             if self._closing:
                 raise InferencePoolUnavailable(self.name)
             self._retired_models.discard(model)
             parallel_model = self._wrap(model)
-            if _model_load_hooks_active.get():
+            if _model_load_hook.get() is not None:
                 # The pool hook is preparation, not frontend publication. Replay
                 # waits for the registry to finish every subsequent hook as well.
                 self._staged[parallel_model] = (
@@ -662,13 +662,33 @@ class InferencePool:
             if self._recovery_task is task:
                 self._recovery_task = None
 
-    async def _dispatch_owned(self, message: ModelUpdateMessage) -> None:
+    async def _dispatch_owned(
+        self, message: ModelUpdateMessage, candidate: MLModel | None = None
+    ) -> None:
         # A frontend deadline cannot cancel an update already delivered to an
         # independent process. Keep the response waiter until it settles.
         dispatch = asyncio.create_task(self._dispatcher.dispatch_update(message))
         try:
             await asyncio.shield(dispatch)
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as error:
+            hook = _model_load_hook.get()
+            if (
+                hook is not None
+                and hook.owner is not None
+                and isinstance(error, asyncio.CancelledError)
+                and candidate is not None
+            ):
+
+                def observe(on_settled: _LoadObserver) -> None:
+                    dispatch.add_done_callback(
+                        lambda _: on_settled(message._load_failure)
+                    )
+
+                hook.settlements[error] = observe
+                if hook.owner.cancelling():
+                    # Only a cancellation of the frontend hook can hand off a
+                    # child Load whose cancellation it does not propagate directly.
+                    hook.settlements[id(candidate)] = observe
             self._begin_recovery(dispatch, message)
             raise
 
