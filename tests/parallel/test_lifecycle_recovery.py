@@ -223,7 +223,8 @@ async def test_cancelled_task_group_reports_already_settled_worker_load(
 
 @pytest.mark.parametrize("transport", ["queue", "zmq"])
 @pytest.mark.parametrize(
-    "outcome", ["exception", "false", "success", "removed", "worker-timeout"]
+    "outcome",
+    ["exception", "runtime-timeout", "false", "success", "removed", "worker-timeout"],
 )
 async def test_abandoned_worker_load_index_reason(
     settings,
@@ -254,6 +255,7 @@ async def test_abandoned_worker_load_index_reason(
             version="candidate",
             extra={"lifecycle_barrier": str(tmp_path)},
             load_error=outcome in ("exception", "removed"),
+            load_timeout=outcome == "runtime-timeout",
             load_returns_false=outcome == "false",
         ),
     )
@@ -294,7 +296,7 @@ async def test_abandoned_worker_load_index_reason(
             await asyncio.shield(cleanup)
 
             reason = ""
-            if outcome in ("exception", "false"):
+            if outcome in ("exception", "runtime-timeout", "false"):
                 reason = (
                     "Model failed to load. See the load response and server logs "
                     "for details."
@@ -303,11 +305,15 @@ async def test_abandoned_worker_load_index_reason(
                 candidate.version: (State.UNAVAILABLE, reason),
                 original.version: (State.READY, ""),
             }
-            if outcome in ("exception", "false", "removed"):
-                cause = (
-                    "returned False" if outcome == "false" else ErrorModel.error_message
+            if outcome in ("exception", "removed"):
+                assert ErrorModel.error_message in caplog.text
+            elif outcome == "false":
+                assert "returned False" in caplog.text
+            elif outcome == "runtime-timeout":
+                assert (
+                    "builtins.TimeoutError: runtime artifact read timed out"
+                    in caplog.text
                 )
-                assert cause in caplog.text
             with pytest.raises(ModelNotFound):
                 await registry.get_model(candidate.name, candidate.version)
             assert not pool.has_model(candidate)

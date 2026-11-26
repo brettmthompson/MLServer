@@ -52,9 +52,9 @@ class WorkerError(MLServerError):
         https://github.com/SeldonIO/MLServer/issues/881
     """
 
-    def __init__(self, exc: BaseException):
+    def __init__(self, exc: BaseException, *, deadline_expired: bool = False):
         # The parent receives this wrapper across IPC, without the original type.
-        self._interrupted = isinstance(exc, (CancelledError, TimeoutError))
+        self._interrupted = isinstance(exc, CancelledError) or deadline_expired
         msg = str(exc)
         if isinstance(exc, BaseException):
             exc_class = exc.__class__

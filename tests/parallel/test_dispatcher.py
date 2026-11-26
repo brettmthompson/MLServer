@@ -186,7 +186,7 @@ async def test_dispatch_update_serializes_updates(
     "second_reply, confirmed",
     [
         (ModelResponseMessage(), False),
-        (WorkerError(TimeoutError()), False),
+        (WorkerError(TimeoutError()), True),
         (WorkerError(asyncio.CancelledError()), False),
         (WorkerError(ValueError("load failed")), True),
     ],

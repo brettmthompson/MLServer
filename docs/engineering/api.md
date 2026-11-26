@@ -252,8 +252,10 @@ For a confirmed initial load failure, the `UNAVAILABLE` row reports
 The server remembers a failure for that exact name and version until it
 successfully publishes the version or observes its removal from the catalog.
 If an initial load times out, the caller receives the timeout. If the runtime
-later raises an exception or returns `False`, the server logs the cause. It
-records the bounded reason only if that attempt is still current at settlement.
+later raises an exception (including its own `TimeoutError`) or returns `False`,
+the server logs the cause and records the bounded reason if the attempt is still
+current. If the worker also reaches its own `model_operation_timeout`, that
+deadline alone does not confirm a runtime failure.
 Observing catalog removal invalidates the attempt, even if the same version
 reappears before preparation finishes. A pending or cancelled preparation, or a
 successful preparation abandoned at the deadline, does not create a failure record.

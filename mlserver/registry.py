@@ -778,7 +778,11 @@ class MultiModelRegistry:
     )
     @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def load(
-        self, model_settings: ModelSettings, parallel: bool = False
+        self,
+        model_settings: ModelSettings,
+        parallel: bool = False,
+        *,
+        _on_cancel: Callable[[], None] | None = None,
     ) -> MLModel:
         """
         Load or reload a model. Lazily creates a :class:`SingleModelRegistry`
@@ -802,13 +806,17 @@ class MultiModelRegistry:
             return await self._models[model_settings.name].load(
                 model_settings, parallel
             )
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as error:
             # Clean up the single model registry on load failure if empty
             if (
                 model_settings.name in self._models
                 and self._models[model_settings.name].empty()
             ):
                 del self._models[model_settings.name]
+            if _on_cancel is not None and isinstance(error, asyncio.CancelledError):
+                # The worker observes cancellation here, before the lifecycle
+                # deadline translates it into TimeoutError outside this method.
+                _on_cancel()
             raise
 
     @with_operation_lock(lambda self, name: self._get_operation_lock(name))
