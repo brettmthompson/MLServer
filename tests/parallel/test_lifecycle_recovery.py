@@ -9,6 +9,7 @@ from mlserver.handlers.dataplane import DataPlane
 from mlserver.errors import ModelNotFound
 from mlserver.handlers.model_repository import ModelRepositoryHandlers
 from mlserver.parallel.errors import NoWorkersAvailable
+from mlserver.parallel.dispatcher import DispatchUpdateSettlement
 from mlserver.parallel.pool import InferencePool
 from mlserver.parallel.messages import ModelRequestMessage
 from mlserver.registry import MultiModelRegistry
@@ -33,7 +34,7 @@ async def test_timeout_quarantines_until_rollback(
     async def dispatch(message):
         entered.set()
         await release.wait()
-        return []
+        return DispatchUpdateSettlement([])
 
     monkeypatch.setattr(pool._dispatcher, "dispatch_update", dispatch)
     operation = asyncio.create_task(pool.load_model(sum_model))
@@ -122,44 +123,47 @@ async def test_load_hook_attributes_only_its_own_worker_failure(
     target.parameters.version = "requested"
     worker_load = None
 
-    async def cancel_worker_load():
-        assert worker_load is not None
-        worker_load.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await worker_load
-
-    async def first_hook(model):
-        nonlocal worker_load
-        if delegation == "await":
-            # The hook delegates its own preparation to a different instance.
-            return await pool.load_model(load_error_model)
-        candidate = (
-            model if delegation == "handled-same-candidate" else load_error_model
-        )
-        worker_load = asyncio.create_task(pool.load_model(candidate))
-        await wait_until((tmp_path / f"entered-{pid}").exists)
-        if delegation == "outlives-hook":
-            return model
-        await cancel_worker_load()
-        if delegation == "completed-hook":
-            return model
-        return await later_hook(model)
-
-    async def later_hook(model):
-        if delegation == "outlives-hook":
-            await cancel_worker_load()
-        waiting.set()
-        await asyncio.Event().wait()
-
-    registry = MultiModelRegistry(
-        on_model_load=[first_hook, later_hook],
-        model_operation_timeout=1,
-    )
     async with asyncio.timeout(30):
         await pool.start()
         (pid,) = pool._workers
         release = tmp_path / f"release-{pid}"
         try:
+
+            async def cancel_worker_load():
+                assert worker_load is not None
+                worker_load.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await worker_load
+
+            async def first_hook(model):
+                nonlocal worker_load
+                if delegation == "await":
+                    # The hook delegates its own preparation to a different instance.
+                    return await pool.load_model(load_error_model)
+                candidate = (
+                    model
+                    if delegation == "handled-same-candidate"
+                    else load_error_model
+                )
+                worker_load = asyncio.create_task(pool.load_model(candidate))
+                await wait_until((tmp_path / f"entered-{pid}").exists)
+                if delegation == "outlives-hook":
+                    return model
+                await cancel_worker_load()
+                if delegation == "completed-hook":
+                    return model
+                return await later_hook(model)
+
+            async def later_hook(model):
+                if delegation == "outlives-hook":
+                    await cancel_worker_load()
+                waiting.set()
+                await asyncio.Event().wait()
+
+            registry = MultiModelRegistry(
+                on_model_load=[first_hook, later_hook],
+                model_operation_timeout=1,
+            )
             # Warm the worker before applying the frontend deadline.
             await pool.load_model(sum_model)
             with pytest.raises(asyncio.TimeoutError):

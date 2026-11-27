@@ -33,7 +33,8 @@ async def test_dispatch(
     load_message: ModelUpdateMessage,
     inference_request_message: ModelRequestMessage,
 ):
-    await dispatcher.dispatch_update(load_message)
+    settlement = await dispatcher.dispatch_update(load_message)
+    assert settlement.primary_error is None
     response_message = await dispatcher.dispatch_request(inference_request_message)
 
     assert response_message.exception is None
@@ -60,8 +61,8 @@ async def test_dispatch_update_load_no_workers(
     dispatcher = Dispatcher({}, responses)
     dispatcher.start()
     try:
-        with pytest.raises(NoWorkersAvailable):
-            await dispatcher.dispatch_update(load_message)
+        settlement = await dispatcher.dispatch_update(load_message)
+        assert isinstance(settlement.primary_error, NoWorkersAvailable)
     finally:
         await terminate_queue(responses)
         await dispatcher.stop()
@@ -191,7 +192,7 @@ async def test_dispatch_update_serializes_updates(
         (WorkerError(ValueError("load failed")), True),
     ],
 )
-async def test_dispatch_update_raises_non_worker_error(
+async def test_dispatch_update_returns_non_worker_error(
     responses,
     load_message: ModelUpdateMessage,
     mocker,
@@ -211,9 +212,10 @@ async def test_dispatch_update_raises_non_worker_error(
         side_effect=[RuntimeError("update failed"), second_reply],
     )
 
-    with pytest.raises(RuntimeError, match="update failed"):
-        await dispatcher.dispatch_update(load_message)
-    assert load_message._load_failure is (second_reply if confirmed else None)
+    settlement = await dispatcher.dispatch_update(load_message)
+    assert isinstance(settlement.primary_error, RuntimeError)
+    assert settlement.primary_error.args == ("update failed",)
+    assert settlement.late_load_failure is (second_reply if confirmed else None)
 
 
 async def test_load_failure_is_scoped_to_one_broadcast(
@@ -228,19 +230,21 @@ async def test_load_failure_is_scoped_to_one_broadcast(
         dispatcher, "dispatch_update_to_worker", side_effect=[failure, success, failure]
     )
 
-    with pytest.raises(WorkerError):
-        await dispatcher.dispatch_update(load_message)
-    assert load_message._load_failure is failure
+    settlement = await dispatcher.dispatch_update(load_message)
+    assert settlement.primary_error is failure
+    assert settlement.late_load_failure is failure
 
-    assert await dispatcher.dispatch_update(load_message) == [success]
-    assert load_message._load_failure is None
+    settlement = await dispatcher.dispatch_update(load_message)
+    assert settlement.successes == [success]
+    assert settlement.primary_error is None
+    assert settlement.late_load_failure is None
 
-    with pytest.raises(WorkerError):
-        await dispatcher.dispatch_update(unload_message)
-    assert unload_message._load_failure is None
+    settlement = await dispatcher.dispatch_update(unload_message)
+    assert settlement.primary_error is failure
+    assert settlement.late_load_failure is None
 
 
-async def test_dispatch_update_raises_when_all_workers_stop_for_load(
+async def test_dispatch_update_returns_no_workers_error_for_load(
     responses,
     load_message: ModelUpdateMessage,
     mocker,
@@ -258,8 +262,8 @@ async def test_dispatch_update_raises_when_all_workers_stop_for_load(
         side_effect=[WorkerStop(1), WorkerStop(2)],
     )
 
-    with pytest.raises(NoWorkersAvailable):
-        await dispatcher.dispatch_update(load_message)
+    settlement = await dispatcher.dispatch_update(load_message)
+    assert isinstance(settlement.primary_error, NoWorkersAvailable)
 
 
 async def test_dispatch_update_returns_successes_when_some_workers_stop(
@@ -281,7 +285,9 @@ async def test_dispatch_update_returns_successes_when_some_workers_stop(
         side_effect=[WorkerStop(1), success],
     )
 
-    assert await dispatcher.dispatch_update(load_message) == [success]
+    settlement = await dispatcher.dispatch_update(load_message)
+    assert settlement.successes == [success]
+    assert settlement.primary_error is None
 
 
 async def test_dispatch_update_allows_all_workers_to_stop_during_unload(
@@ -302,7 +308,9 @@ async def test_dispatch_update_allows_all_workers_to_stop_during_unload(
         side_effect=[WorkerStop(1), WorkerStop(2)],
     )
 
-    assert await dispatcher.dispatch_update(unload_message) == []
+    settlement = await dispatcher.dispatch_update(unload_message)
+    assert settlement.successes == []
+    assert settlement.primary_error is None
 
 
 async def test_on_worker_start_defers_cancellation_until_initialization_finishes(

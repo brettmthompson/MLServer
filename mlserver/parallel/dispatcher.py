@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 
 from typing import cast, TYPE_CHECKING
 from weakref import WeakKeyDictionary
@@ -29,6 +30,22 @@ from .messages import (
     ModelResponseMessage,
 )
 from prometheus_client import Histogram
+
+
+@dataclass
+class DispatchUpdateSettlement:
+    """Aggregated results from broadcasting one model update.
+
+    ``primary_error`` is the first non-worker-stop error that the owning pool
+    must expose to the caller. ``late_load_failure`` is independent: it is a
+    confirmed, non-interrupted worker load failure that deferred cancellation
+    handling must report to the model registry.
+    """
+
+    successes: list[ModelResponseMessage]
+    primary_error: BaseException | None = None
+    late_load_failure: WorkerError | None = None
+
 
 QUEUE_METRIC_NAME = "parallel_request_queue"
 
@@ -332,8 +349,14 @@ class Dispatcher:
     @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def dispatch_update(
         self, model_update: ModelUpdateMessage
-    ) -> list[ModelResponseMessage]:
-        model_update._load_failure = None
+    ) -> DispatchUpdateSettlement:
+        """Broadcast an update and return all outcomes in one settlement.
+
+        Worker dispatch errors are returned rather than raised so callers that
+        must continue observing the broadcast after cancellation can inspect
+        the final worker results. The owning pool re-raises ``primary_error``
+        for the normal caller path.
+        """
         # Dispatch to all workers concurrently and wait for results
         # to ensure state is properly maintained
         results = await asyncio.gather(
@@ -351,26 +374,37 @@ class Dispatcher:
             elif not isinstance(r, WorkerStop):
                 non_stop = non_stop or r
 
-        # If any error other than a worker stop error is returned raise immediately
+        # Preserve the first non-stop error for the owner to raise, while also
+        # returning any confirmed load failure for deferred cancellation handling.
         if non_stop:
+            late_load_failure = None
             if model_update.update_type == ModelUpdateType.Load:
                 # A different worker may have confirmed a load failure even
                 # when the primary dispatch error was a transport failure.
                 for reply in results:
                     if isinstance(reply, WorkerError) and not reply._interrupted:
-                        model_update._load_failure = reply
+                        late_load_failure = reply
                         break
-            raise non_stop
+            return DispatchUpdateSettlement(
+                successes=successes,
+                primary_error=non_stop,
+                late_load_failure=late_load_failure,
+            )
         # If every worker stopped without returning a successful response, a
         # load cannot establish model state and must fail so the caller can
         # roll back. Unload remains successful because the desired state is
         # already removal.
         if not successes and model_update.update_type == ModelUpdateType.Load:
-            raise NoWorkersAvailable()
+            return DispatchUpdateSettlement(
+                successes=successes,
+                primary_error=NoWorkersAvailable(),
+            )
 
         # If at least one result is a success, this means any workers that crashed
         # will properly recover on replay
-        return cast(list[ModelResponseMessage], successes)
+        return DispatchUpdateSettlement(
+            successes=cast(list[ModelResponseMessage], successes)
+        )
 
     async def dispatch_update_to_worker(
         self, worker: Worker, model_update: ModelUpdateMessage

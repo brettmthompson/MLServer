@@ -26,7 +26,7 @@ from .messages import (
     ModelUpdateMessage,
     ModelUpdateType,
 )
-from .dispatcher import Dispatcher
+from .dispatcher import DispatchUpdateSettlement, Dispatcher
 
 
 PredictMethod = Callable[[InferenceRequest], Awaitable[InferenceResponse]]
@@ -669,7 +669,9 @@ class InferencePool:
         # independent process. Keep the response waiter until it settles.
         dispatch = asyncio.create_task(self._dispatcher.dispatch_update(message))
         try:
-            await asyncio.shield(dispatch)
+            settlement = await asyncio.shield(dispatch)
+            if settlement.primary_error is not None:
+                raise settlement.primary_error
         except (Exception, asyncio.CancelledError) as error:
             hook = _model_load_hook.get()
             if (
@@ -680,9 +682,24 @@ class InferencePool:
             ):
 
                 def observe(on_settled: _LoadObserver) -> None:
-                    dispatch.add_done_callback(
-                        lambda _: on_settled(message._load_failure)
-                    )
+                    # The dispatch task is shielded from the caller's
+                    # cancellation. Observe its final settlement so a
+                    # confirmed worker load failure can be reported after the
+                    # caller has already received its timeout.
+                    def settled(
+                        task: asyncio.Task[DispatchUpdateSettlement],
+                    ) -> None:
+                        if task.cancelled():
+                            on_settled(None)
+                            return
+                        try:
+                            settlement = task.result()
+                        except BaseException:
+                            on_settled(None)
+                        else:
+                            on_settled(settlement.late_load_failure)
+
+                    dispatch.add_done_callback(settled)
 
                 hook.settlements[error] = observe
                 if hook.owner.cancelling():
@@ -723,7 +740,8 @@ class InferencePool:
     ) -> None:
         failed = None
         try:
-            await dispatch
+            settlement = await dispatch
+            failed = settlement.primary_error
         except (Exception, asyncio.CancelledError) as error:
             failed = error
         if self._closing:
@@ -732,13 +750,15 @@ class InferencePool:
             # Settlement alone is insufficient: partial success may have left
             # staged instances on some workers. Restore the old committed state
             # with acknowledged cleanup before allowing any routing or replay.
-            await self._dispatcher.dispatch_update(
+            settlement = await self._dispatcher.dispatch_update(
                 ModelUpdateMessage(
                     update_type=ModelUpdateType.Unload,
                     model_settings=message.model_settings,  # type: ignore
                     rollback=message.rollback,
                 )
             )
+            if settlement.primary_error is not None:
+                raise settlement.primary_error
         elif failed is not None:
             # An unacknowledged unload is unsafe to replay by name: a second
             # unload could remove the replacement which the first committed.
