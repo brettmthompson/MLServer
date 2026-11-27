@@ -694,7 +694,7 @@ async def test_index_item_while_model_loads(
 @pytest.fixture
 def abandoned_load(model_repository, sum_model_settings, mocker):
     """Hold a SumModel load past its deadline and release it on demand."""
-    registry = MultiModelRegistry(model_operation_timeout=5)
+    registry = MultiModelRegistry(on_model_load=[], model_operation_timeout=5)
     handlers = ModelRepositoryHandlers(model_repository, registry)
     catalog = [sum_model_settings]
     mocker.patch.object(model_repository, "list", return_value=catalog)
@@ -889,3 +889,37 @@ async def test_abandoned_failure_uses_requested_version(abandoned_load):
             ),
             (redirected.name, redirected.version): (State.UNAVAILABLE, ""),
         }
+
+
+async def test_redirected_retry_clears_requested_failure(abandoned_load, mocker):
+    registry, catalog, index, start = abandoned_load
+    requested = catalog[0]
+    requested.parameters.version = "1"
+    redirected = requested.model_copy(deep=True)
+    redirected.parameters.version = "2"
+    catalog.append(redirected)
+
+    _, release, cleanup = await start(False)
+    release.set()
+    await asyncio.shield(cleanup)
+    assert registry.has_load_failure(requested)
+
+    async def change_version(model):
+        model.settings.parameters.version = redirected.version
+        return model
+
+    registry._on_model_load.append(change_version)
+    try:
+        mocker.patch.object(requested.implementation, "load", return_value=True)
+
+        current = await registry.load(requested.model_copy(deep=True))
+
+        assert current.version == redirected.version
+        assert not registry.has_load_failure(requested)
+        assert await index() == {
+            (requested.name, requested.version): (State.UNAVAILABLE, ""),
+            (redirected.name, redirected.version): (State.READY, ""),
+        }
+    finally:
+        registry._on_model_load.remove(change_version)
+        await registry.unload(requested.name)

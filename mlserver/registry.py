@@ -249,11 +249,16 @@ class SingleModelRegistry:
             # Workers stage replacement publication until the main process
             # dispatches the old generation's unload separately.
             if not parallel:
-                await self._publish_model(new_model, previous_loaded_model)
+                await self._publish_model(new_model, previous_loaded_model, attempt)
 
         return new_model
 
-    async def _publish_model(self, model: MLModel, previous: MLModel | None) -> None:
+    async def _publish_model(
+        self,
+        model: MLModel,
+        previous: MLModel | None,
+        attempt: tuple[str, str] | None,
+    ) -> None:
         # A hook can redirect preparation to another committed version. Both
         # displaced instances stay owned, even if the first cleanup times out.
         target = self._find_exact_version(model.version)
@@ -270,6 +275,10 @@ class SingleModelRegistry:
             old.ready = False
         self._refresh_default()
         self._register(model)
+        # A load hook may publish a different version than the one requested.
+        # Clear both keys only after the replacement has been committed.
+        if attempt is not None:
+            self._load_failures.discard(attempt)
         self._load_failures.discard((self._name, model.version or ""))
         cleanup = [self._start_cleanup(old) for old in retired]
         results = await asyncio.gather(
